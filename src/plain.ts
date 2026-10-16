@@ -13,8 +13,11 @@ import {
   formatSessions,
   pickSession,
   recentSessions,
+  settingsCommand,
   syntheticText,
 } from './commands.js'
+import { withImages, type Content } from './images.js'
+import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
 
 const isTTY = stdout.isTTY === true
 
@@ -32,8 +35,8 @@ async function* inbox(): AsyncGenerator<SDKUserMessage> {
   }
 }
 
-const send = (text: string) => {
-  pending.push({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null })
+const send = (content: Content) => {
+  pending.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null })
   wake?.()
 }
 
@@ -105,14 +108,17 @@ const HELP = `${c.bold('Commands')}
   /continue     pick up the most recent conversation here
   /agents       list the subagents Claude can use
   /milo         show Milo (add small or big, and thinking, working or error)
+  /settings     show Milo's settings, or save one: /settings default_mode Auto
   /new          start a fresh conversation
   /exit         leave (Ctrl+D works too)
   Tab finishes the command you are typing.
-  Anything else, including Claude Code commands like /model, /context, /compact and /usage, goes to Claude.`
+  Image files named in a prompt (typed or dragged in) are sent as pictures.
+  Anything else, including Claude Code commands like /model, /context, /compact and /usage, goes to Claude.
+  Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`
 
 // Milo's own commands, suggested ahead of Claude Code's, and their options.
-const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'agents', 'milo', 'new', 'exit']
-const OPTIONS = { milo: ['small', 'big', 'thinking', 'working', 'error'] }
+const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'agents', 'milo', 'settings', 'new', 'exit']
+const OPTIONS = { milo: ['small', 'big', 'thinking', 'working', 'error'], settings: SETTING_NAMES }
 let commandList = MILO_COMMANDS
 
 // Tab finishes the command being typed.
@@ -290,6 +296,8 @@ const startSession = (resume?: string) => {
     },
   })
   const current = session
+  if (settings.defaultMode)
+    current.setPermissionMode(settings.defaultMode).catch(() => line(c.red(`${settings.defaultMode} mode isn't available here.`)))
   current
     .supportedCommands()
     .then(commands => (commandList = [...new Set([...MILO_COMMANDS, ...commandNames(commands)])]))
@@ -349,6 +357,7 @@ const main = async () => {
   rl.on('close', shutdown) // Ctrl+D or end of piped input
 
   banner()
+  for (const problem of settingsProblems) line(c.red(problem))
   startSession()
 
   while (true) {
@@ -373,6 +382,13 @@ const main = async () => {
       continue
     }
     const [name, arg] = text.split(/\s+/)
+    if (name === '/settings') {
+      const result = settingsCommand(text.slice(name.length))
+      line(result.ok ? result.text : c.red(result.text))
+      if (result.ok && arg) line(c.dim('It takes effect the next time Milo starts.'))
+      line()
+      continue
+    }
     try {
       if (name === '/commands') {
         line(formatCommands(await session.supportedCommands()))
@@ -413,11 +429,14 @@ const main = async () => {
       continue
     }
 
+    const prompt = withImages(text)
+    for (const image of prompt.images) line(c.dim(`  🖼  ${image}`))
+    for (const problem of prompt.problems) line(c.red(`  ${problem}`))
     replyStarted = false
     turnStarted = Date.now()
     const finished = new Promise<void>(resolve => (turnDone = resolve))
     startSpinner('thinking')
-    send(text)
+    send(prompt.content)
     await finished
   }
   shutdown()

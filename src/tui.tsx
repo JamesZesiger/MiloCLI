@@ -10,9 +10,11 @@ import { portrait, type Size } from './portrait.js'
 import { align } from './diff.js'
 import { logLines } from './render.js'
 import { highlight, isEmpty, selectedText, type Selection } from './select.js'
-import { completion, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
+import { completion, settingsCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
+import { pasteImage } from './images.js'
 import { getState, push, setState, useStore, type Diff, type State } from './store.js'
 import * as session from './session.js'
+import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
 import type { SDKSessionInfo } from '@anthropic-ai/claude-agent-sdk'
 
 const HEADER_HEIGHT = 8
@@ -46,24 +48,29 @@ const HELP = [
   '  /milo [size]   show Milo (small or big; thinking, working or error)',
   '  /diff          show or hide the last file change',
   '  /copy [n]      copy the last reply, or the nth from last, to the clipboard',
+  '  /settings      show Milo\'s settings, or save one: /settings default_mode Auto',
   '  /new           start a fresh conversation',
   '  /exit          leave',
   c.bold('Keys'),
   '  Tab            finish the command you are typing',
   '  PgUp / PgDn    scroll the workspace or the diff (the mouse wheel works too)',
   '  Ctrl+O         show or hide the last file change',
+  '  Ctrl+V / Alt+V paste an image from the clipboard',
   '  Drag           select text in the workspace; letting go copies it',
   '  Shift+Tab      switch permission mode',
   '  Esc            stop a reply, or close the diff',
+  'Image files named in a prompt (typed or dragged in) are sent as pictures.',
   '  Ctrl+C         stop a reply (twice forces it), clear the input, or leave',
   'Anything else, including Claude Code commands like /model, /context, /compact and /usage, goes to Claude.',
+  `Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`,
 ].join('\n')
 
 // Milo's own commands, suggested ahead of Claude Code's, and their options.
-const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'status', 'mode', 'agents', 'milo', 'diff', 'copy', 'new', 'exit']
+const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'status', 'mode', 'agents', 'milo', 'diff', 'copy', 'settings', 'new', 'exit']
 const OPTIONS: Record<string, readonly string[]> = {
   mode: session.MODES,
   milo: ['small', 'big', 'thinking', 'working', 'error'],
+  settings: SETTING_NAMES,
 }
 
 const seconds = (ms: number) => {
@@ -269,7 +276,7 @@ const StatusLine = ({ width, s, frame, now, notice }: { width: number; s: State;
   return (
     <Box width={width} height={1}>
       <Text wrap="truncate">
-        {` ${c.orange(FACES[s.mood])} ${message}  ${c.dim(time)}  ${c.dim(tools)}`}
+        {`${c.orange(FACES[s.mood])} ${message}  ${c.dim(time)}  ${c.dim(tools)}`}
       </Text>
     </Box>
   )
@@ -317,9 +324,9 @@ const inputLines = (s: State, input: string, cursor: number, width: number, ghos
 
 const InputBox = ({ width, lines, mood }: { width: number; lines: string[]; mood: Mood }) => {
   // Milo's paws rest on the top edge, centered under the face on the status
-  // line (which starts one column in) and in the same orange.
+  // line (which starts above the corner) and in the same orange.
   const paws = 'U─U'
-  const before = Math.max(0, 1 + Math.floor((stringWidth(FACES[mood]) - paws.length) / 2) - 1)
+  const before = Math.max(0, Math.floor((stringWidth(FACES[mood]) - paws.length) / 2) - 1)
   const after = Math.max(0, width - 2 - before - paws.length)
   const top = `┌${'─'.repeat(before)}${c.orange("U")}${"─"}${c.orange("U")}${'─'.repeat(after)}┐`
   return (
@@ -347,6 +354,8 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const [notice, setNotice] = useState('')
   const [input, setInput] = useState('')
   const [cursor, setCursor] = useState(0)
+  const typing = useRef({ input, cursor })
+  typing.current = { input, cursor }
   const [scroll, setScroll] = useState(0)
   const [diffScroll, setDiffScroll] = useState(0)
   const [frame, setFrame] = useState(0)
@@ -367,7 +376,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const names = useMemo(() => [...new Set([...MILO_COMMANDS, ...s.commands])], [s.commands])
   const ghost = !s.pending && cursor === input.length ? completion(input, names, OPTIONS) : ''
   const boxWidth = Math.max(20, columns - 2)
-  const lines = inputLines(s, input, cursor, columns, ghost)
+  const lines = inputLines(s, input, cursor, boxWidth, ghost)
   const inputHeight = lines.length + 2
   const workspaceHeight = Math.max(4, rows - HEADER_HEIGHT - 1 - inputHeight)
   const diff = s.showDiff ? (s.pending?.kind === 'permission' && s.pending.diff) || s.lastDiff : undefined
@@ -400,6 +409,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       .then(result => note(show(result)))
       .catch((err: unknown) => note(err instanceof Error ? err.message : String(err), 'error'))
   }
+  // This folder's earlier conversations, which /resume <number> picks from.
+  const loadSessions = () => recentSessions().then(found => (listed.current = found))
+  useEffect(() => {
+    loadSessions().catch(() => {})
+  }, [])
+
   const resume = (id: string | undefined) => {
     if (!id) return note('Pick a number from /resume, or give a session id.', 'dim')
     session.restart(id).catch((err: unknown) => note(`Couldn't resume: ${err instanceof Error ? err.message : String(err)}`, 'error'))
@@ -432,14 +447,15 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
         return true
       }
       case '/resume':
-        if (args[0]) resume(pickSession(args[0], listed.current))
-        else
-          recentSessions()
-            .then(found => {
-              listed.current = found.filter(f => f.sessionId !== getState().sessionId)
-              note(formatSessions(listed.current))
-            })
-            .catch((err: unknown) => note(err instanceof Error ? err.message : String(err), 'error'))
+        // A number typed before the list loads waits for it.
+        ;(args[0] && listed.current.length ? Promise.resolve(listed.current) : loadSessions())
+          .then(found => {
+            // Leave out this conversation, which may have been saved since the list loaded.
+            const others = found.filter(f => f.sessionId !== getState().sessionId)
+            if (args[0]) resume(pickSession(args[0], others))
+            else note(formatSessions(others))
+          })
+          .catch((err: unknown) => note(err instanceof Error ? err.message : String(err), 'error'))
         return true
       case '/continue':
         recentSessions(2)
@@ -454,6 +470,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       case '/quit':
         exit()
         return true
+      case '/settings': {
+        const result = settingsCommand(text.slice(name!.length))
+        note(result.text, result.ok ? 'raw' : 'error')
+        if (result.ok && args.length) note('It takes effect the next time Milo starts. /mode switches now.', 'dim')
+        return true
+      }
       case '/help':
         push({ kind: 'note', text: HELP, tone: 'raw' })
         return true
@@ -590,6 +612,19 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       else if (state.busy) session.interrupt()
       return
     }
+    if ((key.ctrl || key.meta) && ch === 'v') {
+      setNotice('Checking the clipboard…')
+      void pasteImage().then(file => {
+        if (!file) return setNotice('No image on the clipboard')
+        // The clipboard takes a moment, so insert where the cursor is now.
+        const { input: text, cursor: at } = typing.current
+        const gap = at > 0 && !/\s/.test(text[at - 1]!) ? ' ' : ''
+        const added = `${gap}${file} `
+        edit(text.slice(0, at) + added + text.slice(at), at + added.length)
+        setNotice('Image pasted')
+      })
+      return
+    }
     if (key.ctrl && ch === 'd') {
       if (!input) exit()
       return
@@ -639,8 +674,10 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
           />
         )}
       </Box>
-      <StatusLine width={columns} s={s} frame={frame} now={now} notice={notice} />
-      <InputBox width={columns} lines={lines} mood={s.mood} />
+      <Box paddingX={1} flexDirection="column">
+        <StatusLine width={boxWidth} s={s} frame={frame} now={now} notice={notice} />
+        <InputBox width={boxWidth} lines={lines} mood={s.mood} />
+      </Box>
     </Box>
   )
 }
@@ -652,6 +689,12 @@ const Root = () => {
 
 export const main = async () => {
   session.start()
+  for (const text of settingsProblems) push({ kind: 'note', text, tone: 'error' })
+  const mode = settings.defaultMode
+  if (mode)
+    session
+      .setMode(mode)
+      .catch(() => push({ kind: 'note', text: `${MODE_LABELS[mode]} isn't available here, so Milo started in the default mode.`, tone: 'error' }))
   // If Milo crashes, don't leave the terminal reporting mouse clicks.
   process.once('exit', () => process.stdout.write(MOUSE_OFF))
   const app = render(<Root />, { alternateScreen: true, exitOnCtrlC: false, maxFps: 30 })

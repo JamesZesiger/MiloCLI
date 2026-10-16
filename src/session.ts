@@ -10,7 +10,9 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { commandNames, history, syntheticText } from './commands.js'
+import { withImages, type Content } from './images.js'
 import { PERSONA, PAST, VERBS, pick } from './milo.js'
+import { MODES } from './settings.js'
 import { getState, push, setState, type Choice, type Diff, type Entry, type Question } from './store.js'
 
 const DECLINED = 'The user declined this action.'
@@ -32,8 +34,8 @@ const createInbox = () => {
   }
   return {
     messages: messages(),
-    send: (text: string) => {
-      pending.push({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null })
+    send: (content: Content) => {
+      pending.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null })
       wake?.()
     },
     close: () => {
@@ -272,13 +274,14 @@ const handle = (msg: SDKMessage) => {
   }
 }
 
-export const start = (resume?: string) => {
+export const start = (resume?: string, permissionMode?: PermissionMode) => {
   inbox = createInbox()
   const current = query({
     prompt: inbox.messages,
     options: {
       cwd: process.cwd(),
       resume,
+      permissionMode,
       includePartialMessages: true,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: PERSONA },
       settingSources: ['user', 'project', 'local'],
@@ -320,9 +323,11 @@ export const submit = (text: string) => {
     push({ kind: 'note', text: `Queued: ${clip(text, 60)}`, tone: 'dim' })
     return
   }
-  push({ kind: 'user', text })
+  const prompt = withImages(text)
+  push({ kind: 'user', text, images: prompt.images })
+  for (const problem of prompt.problems) push({ kind: 'note', text: problem, tone: 'error' })
   setState({ busy: true, mood: 'thinking', status: pick(VERBS), turnStarted: Date.now(), turnTools: 0 })
-  inbox?.send(text)
+  inbox?.send(prompt.content)
 }
 
 // --- Stopping a reply ------------------------------------------------------
@@ -373,6 +378,8 @@ export const interrupt = () => {
 /** A fresh conversation, or an earlier one picked up where it left off. */
 export const restart = async (resume?: string) => {
   const entries = resume ? await history(resume, summarize) : []
+  // Keep the mode the user picked; a new session would start in the default.
+  const mode = getState().mode as PermissionMode
   close()
   queued.length = 0
   agentCalls.clear()
@@ -389,10 +396,10 @@ export const restart = async (resume?: string) => {
     pending: undefined,
     sessionId: undefined,
   })
-  start(resume)
+  start(resume, MODES.includes(mode) ? mode : undefined)
 }
 
-export const MODES: PermissionMode[] = ['default', 'acceptEdits', 'plan', 'auto']
+export { MODES }
 
 export const setMode = async (mode: PermissionMode) => {
   await session?.setPermissionMode(mode)

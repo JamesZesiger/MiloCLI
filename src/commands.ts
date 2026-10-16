@@ -10,7 +10,26 @@ import {
   type SlashCommand,
 } from '@anthropic-ai/claude-agent-sdk'
 import { c } from './milo.js'
+import { describeSettings, saveSetting, SETTINGS_FILE } from './settings.js'
 import type { Entry } from './store.js'
+
+/**
+ * /settings: lists Milo's settings, or saves one given as
+ * `key value`, `key=value` or `key = "value"`. Returns what to show.
+ */
+export const settingsCommand = (args: string): { text: string; ok: boolean } => {
+  const match = /^([\w-]+)\s*=?\s*(.*)$/.exec(args.trim())
+  if (!match?.[1]) {
+    const rows = describeSettings().map(
+      s => `  ${c.cyan(s.key)} = ${s.value ? `"${s.value}"` : c.dim('not set')}  ${c.dim(`· ${s.about}`)}`,
+    )
+    return { ok: true, text: [c.bold('Milo settings'), ...rows, c.dim(`/settings <name> <value> saves one to ${SETTINGS_FILE}`)].join('\n') }
+  }
+  const [, key, value = ''] = match
+  if (!value) return { ok: false, text: `Give a value too, like /settings ${key} Auto` }
+  const problem = saveSetting(key, value)
+  return problem ? { ok: false, text: problem } : { ok: true, text: `Saved ${key} = "${value.replace(/^["']|["']$/g, '')}".` }
+}
 
 /** Built-in commands like /context and /model reply with one unstreamed message. */
 export const syntheticText = (msg: SDKMessage): string | undefined => {

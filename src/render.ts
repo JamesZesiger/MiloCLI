@@ -1,6 +1,7 @@
 // Turns log entries into wrapped terminal lines for the workspace, so it can
 // show any slice of them when scrolled.
 import wrapAnsi from 'wrap-ansi'
+import { basename } from 'node:path'
 import { c } from './milo.js'
 import type { Entry } from './store.js'
 
@@ -22,7 +23,11 @@ const ICONS = { running: c.dim('⋯'), done: c.green('✓'), error: c.red('✗')
 const linesFor = (entry: Entry, width: number, labelled: boolean): string[] => {
   switch (entry.kind) {
     case 'user':
-      return ['', ...wrap(c.bold(`❯ ${entry.text}`), width)]
+      return [
+        '',
+        ...wrap(c.bold(`❯ ${entry.text}`), width),
+        ...(entry.images ?? []).flatMap(image => wrap(c.dim(`  🖼  ${basename(image)}`), width)),
+      ]
     case 'assistant':
       return [...(labelled ? ['', c.bold(c.orange('Milo'))] : []), ...wrap(markdown(entry.text.trim()), width)]
     case 'tool': {
