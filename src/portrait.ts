@@ -1,8 +1,7 @@
 // Milo's portrait: pixel art drawn with half blocks (▀ ▄), two pixels per
 // character cell, in 24-bit color with a 256-color fallback.
 import type { Mood } from './milo.js'
-
-type RGB = [number, number, number]
+import { to256, truecolor, type RGB } from './theme.js'
 
 const PALETTE: Record<string, RGB> = {
   k: [74, 42, 20], //    outline
@@ -188,13 +187,6 @@ export const pixels = (mood: Mood, size: Size = 'tiny'): string[][] => {
 }
 
 // --- Terminal rendering ----------------------------------------------------
-
-const truecolor = /truecolor|24bit/i.test(process.env.COLORTERM ?? '') || !!process.env.WT_SESSION
-
-const to256 = ([r, g, b]: RGB) => {
-  const level = (v: number) => (v < 48 ? 0 : v < 115 ? 1 : Math.floor((v - 35) / 40))
-  return 16 + 36 * level(r) + 6 * level(g) + level(b)
-}
 
 const fg = (c: RGB) => (truecolor ? `\x1b[38;2;${c.join(';')}m` : `\x1b[38;5;${to256(c)}m`)
 const bg = (c: RGB) => (truecolor ? `\x1b[48;2;${c.join(';')}m` : `\x1b[48;5;${to256(c)}m`)

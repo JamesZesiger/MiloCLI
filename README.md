@@ -66,6 +66,7 @@ edits, Plan and Auto.
 | `/diff`          | Show or hide the last file change                              |
 | `/copy [n]`      | Copy the last reply, or the nth from last, to the clipboard    |
 | `/settings`      | Show Milo's settings, or save one                              |
+| `/theme [name]`  | List the color themes, or switch to one                        |
 | `/new`           | Start a fresh conversation                                     |
 | `/exit`          | Leave                                                          |
 
@@ -111,8 +112,17 @@ line. Claude Code's settings stay in `~/.claude`.
 | Setting        | Meaning                                                      |
 | -------------- | ------------------------------------------------------------ |
 | `default_mode` | The permission mode Milo starts in: Default, Accept edits, Plan or Auto |
+| `theme`        | Milo's colors: milo, tabby, ocean, forest, violet or light   |
 
 Set one from inside Milo with `/settings default_mode Auto`.
+
+### Themes
+
+`/theme` lists the color themes with a sample of each, and `/theme ocean`
+switches to one at once and saves it for next time. The `milo` theme uses your
+terminal's own colors; the others use fixed shades, and `light` suits
+light-background terminals. Themes live in `src/theme.ts`, each giving a shade
+to the four colors Milo uses: accent, focus, ok and error.
 
 ## Project layout
 
@@ -128,6 +138,7 @@ src/
   terminal.ts   the command line: running commands, cd and completion
   images.ts     images in prompts and from the clipboard
   settings.ts   ~/.milo/settings.toml
+  theme.ts      the color themes
   milo.ts       Milo's persona, faces and colors
   portrait.ts   Milo's portrait
 build/

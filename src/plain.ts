@@ -14,10 +14,12 @@ import {
   pickSession,
   recentSessions,
   settingsCommand,
+  themeCommand,
   syntheticText,
 } from './commands.js'
 import { withImages, type Content } from './images.js'
 import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
+import { THEME_NAMES } from './theme.js'
 
 const isTTY = stdout.isTTY === true
 
@@ -58,7 +60,7 @@ const startSpinner = (mood: Mood) => {
   const verb = pick(VERBS)
   let i = 0
   spinner = setInterval(() => {
-    stdout.write(`\r\x1b[2K${c.orange(FRAMES[i++ % FRAMES.length]!)} ${small(mood)} ${c.dim(`${verb}…`)}`)
+    stdout.write(`\r\x1b[2K${c.accent(FRAMES[i++ % FRAMES.length]!)} ${small(mood)} ${c.dim(`${verb}…`)}`)
   }, 120)
 }
 
@@ -78,7 +80,7 @@ const canDrawPortrait = (size: Size = 'tiny') =>
   isTTY && !process.env.NO_COLOR && (stdout.columns ?? 0) >= width(size) + 4
 
 const drawFace = (mood: Mood, info: string[] = [], size: Size = 'tiny') => {
-  const art = canDrawPortrait(size) ? portrait(mood, size) : face(mood).map(row => c.orange(row.padEnd(13)))
+  const art = canDrawPortrait(size) ? portrait(mood, size) : face(mood).map(row => c.accent(row.padEnd(13)))
   const offset = Math.max(0, Math.floor((art.length - info.length) / 2))
   line()
   art.forEach((row, i) => line(`${row}  ${info[i - offset] ?? ''}`))
@@ -87,7 +89,7 @@ const drawFace = (mood: Mood, info: string[] = [], size: Size = 'tiny') => {
 
 const banner = () => {
   const info = [
-    c.bold(c.orange('Milo')),
+    c.bold(c.accent('Milo')),
     c.dim('your coding cat, powered by Claude Code'),
     c.dim(process.cwd()),
     '',
@@ -109,6 +111,7 @@ const HELP = `${c.bold('Commands')}
   /agents       list the subagents Claude can use
   /milo         show Milo (add small or big, and thinking, working or error)
   /settings     show Milo's settings, or save one: /settings default_mode Auto
+  /theme        list the color themes, or switch to one: /theme ocean
   /new          start a fresh conversation
   /exit         leave (Ctrl+D works too)
   Tab finishes the command you are typing.
@@ -117,8 +120,8 @@ const HELP = `${c.bold('Commands')}
   Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`
 
 // Milo's own commands, suggested ahead of Claude Code's, and their options.
-const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'agents', 'milo', 'settings', 'new', 'exit']
-const OPTIONS = { milo: ['small', 'big', 'thinking', 'working', 'error'], settings: SETTING_NAMES }
+const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'agents', 'milo', 'settings', 'theme', 'new', 'exit']
+const OPTIONS = { milo: ['small', 'big', 'thinking', 'working', 'error'], settings: SETTING_NAMES, theme: THEME_NAMES }
 let commandList = MILO_COMMANDS
 
 // Tab finishes the command being typed.
@@ -157,10 +160,10 @@ const answerQuestions = async (input: Record<string, unknown>) => {
   }[]
   const answers: Record<string, string> = {}
   for (const q of questions) {
-    line(`${c.orange(small('thinking'))} ${c.bold(q.question)}`)
-    q.options.forEach((o, i) => line(`  ${c.cyan(String(i + 1))}. ${o.label} ${c.dim(`- ${o.description}`)}`))
+    line(`${c.accent(small('thinking'))} ${c.bold(q.question)}`)
+    q.options.forEach((o, i) => line(`  ${c.focus(String(i + 1))}. ${o.label} ${c.dim(`- ${o.description}`)}`))
     const hint = q.multiSelect ? 'numbers separated by commas, or type your own' : 'a number, or type your own'
-    const raw = await askUser(c.dim(`  (${hint}) `) + c.orange('❯ '))
+    const raw = await askUser(c.dim(`  (${hint}) `) + c.accent('❯ '))
     const picked = raw
       .split(',')
       .map(s => q.options[Number(s.trim()) - 1]?.label)
@@ -177,7 +180,7 @@ const canUseTool: CanUseTool = async (tool, input, { suggestions, decisionReason
     return { behavior: 'allow', updatedInput: { ...input, answers } }
   }
 
-  line(`${c.orange(small('working'))} ${c.bold('Milo wants to use')} ${c.cyan(tool)}`)
+  line(`${c.accent(small('working'))} ${c.bold('Milo wants to use')} ${c.focus(tool)}`)
   const detail = summarize(tool, input)
   if (detail) line(`  ${detail}`)
   if (decisionReason) line(c.dim(`  ${clip(decisionReason)}`))
@@ -223,7 +226,7 @@ const handle = (msg: SDKMessage) => {
         if (!replyStarted) {
           replyStarted = true
           line()
-          line(`${c.orange(small('idle'))} ${c.bold(c.orange('Milo'))}`)
+          line(`${c.accent(small('idle'))} ${c.bold(c.accent('Milo'))}`)
         }
         write(event.delta.text)
       }
@@ -236,7 +239,7 @@ const handle = (msg: SDKMessage) => {
       if (reply) {
         stopSpinner()
         line()
-        line(`${c.orange(small('idle'))} ${c.bold(c.orange('Milo'))}`)
+        line(`${c.accent(small('idle'))} ${c.bold(c.accent('Milo'))}`)
         line(reply)
       }
       for (const block of msg.message.content) {
@@ -257,7 +260,7 @@ const handle = (msg: SDKMessage) => {
           const text = typeof block.content === 'string' ? block.content : 'the tool reported an error'
           if (text === DECLINED) continue // already shown at the prompt
           stopSpinner()
-          line(c.red(`  ${small('error')} ${clip(text)}`))
+          line(c.error(`  ${small('error')} ${clip(text)}`))
           startSpinner('thinking')
         }
       }
@@ -270,7 +273,7 @@ const handle = (msg: SDKMessage) => {
       const cost = billedPerToken && msg.total_cost_usd ? ` · session $${msg.total_cost_usd.toFixed(2)}` : ''
       line()
       if (msg.subtype === 'success') line(c.dim(`${small('idle')} Milo ${pick(PAST)} · ${seconds}s${cost}`))
-      else line(c.red(`${small('error')} Milo stopped (${msg.subtype.replaceAll('_', ' ')})`))
+      else line(c.error(`${small('error')} Milo stopped (${msg.subtype.replaceAll('_', ' ')})`))
       line()
       endTurn()
       return
@@ -297,7 +300,7 @@ const startSession = (resume?: string) => {
   })
   const current = session
   if (settings.defaultMode)
-    current.setPermissionMode(settings.defaultMode).catch(() => line(c.red(`${settings.defaultMode} mode isn't available here.`)))
+    current.setPermissionMode(settings.defaultMode).catch(() => line(c.error(`${settings.defaultMode} mode isn't available here.`)))
   current
     .supportedCommands()
     .then(commands => (commandList = [...new Set([...MILO_COMMANDS, ...commandNames(commands)])]))
@@ -312,7 +315,7 @@ const startSession = (resume?: string) => {
     } catch (err) {
       if (current !== session) return
       stopSpinner()
-      line(c.red(`${small('error')} Claude Code stopped: ${err instanceof Error ? err.message : String(err)}`))
+      line(c.error(`${small('error')} Claude Code stopped: ${err instanceof Error ? err.message : String(err)}`))
       endTurn()
     }
   })()
@@ -357,13 +360,13 @@ const main = async () => {
   rl.on('close', shutdown) // Ctrl+D or end of piped input
 
   banner()
-  for (const problem of settingsProblems) line(c.red(problem))
+  for (const problem of settingsProblems) line(c.error(problem))
   startSession()
 
   while (true) {
     let text: string
     try {
-      text = (await rl.question(c.orange('❯ '))).trim()
+      text = (await rl.question(c.accent('❯ '))).trim()
     } catch {
       break // input closed (Ctrl+D)
     }
@@ -384,8 +387,14 @@ const main = async () => {
     const [name, arg] = text.split(/\s+/)
     if (name === '/settings') {
       const result = settingsCommand(text.slice(name.length))
-      line(result.ok ? result.text : c.red(result.text))
-      if (result.ok && arg) line(c.dim('It takes effect the next time Milo starts.'))
+      line(result.ok ? result.text : c.error(result.text))
+      if (result.ok && arg && arg !== 'theme') line(c.dim('It takes effect the next time Milo starts.'))
+      line()
+      continue
+    }
+    if (name === '/theme') {
+      const result = themeCommand(text.slice(name.length))
+      line(result.ok ? result.text : c.error(result.text))
       line()
       continue
     }
@@ -417,7 +426,7 @@ const main = async () => {
         continue
       }
     } catch (err) {
-      line(c.red(`${small('error')} ${err instanceof Error ? err.message : String(err)}`))
+      line(c.error(`${small('error')} ${err instanceof Error ? err.message : String(err)}`))
       continue
     }
     if (text === '/new') {
@@ -431,7 +440,7 @@ const main = async () => {
 
     const prompt = withImages(text)
     for (const image of prompt.images) line(c.dim(`  🖼  ${image}`))
-    for (const problem of prompt.problems) line(c.red(`  ${problem}`))
+    for (const problem of prompt.problems) line(c.error(`  ${problem}`))
     replyStarted = false
     turnStarted = Date.now()
     const finished = new Promise<void>(resolve => (turnDone = resolve))
