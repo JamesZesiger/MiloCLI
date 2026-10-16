@@ -76,7 +76,7 @@ const HELP = [
   '  Enter          run what you typed in your shell; output shows in the terminal pane',
   '  Ctrl+C         stop the running command (twice kills it)',
   '  Tab / →        finish a command or path (Tab again lists the choices)',
-  '  cd / clear     change folder, which the explorer follows / empty the pane',
+  '  cd / clear     change folder, which the explorer and Milo follow / empty the pane',
   '  ↑ ↓            earlier commands; PgUp / PgDn scroll the output',
   c.bold('Editor'),
   '  Ctrl+S         save the file',
@@ -708,10 +708,11 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     const moved = changeDir(text, termCwd)
     if (moved) {
       setTermLines(l => [...l, echo, ...('problem' in moved ? [c.red(moved.problem)] : [])])
-      // The explorer follows the command line into the new folder.
+      // The explorer and Claude follow the command line into the new folder.
       if ('cwd' in moved) {
         setTermCwd(moved.cwd)
         setExplorerTop(0)
+        session.moveTo(moved.cwd)
       }
       return
     }

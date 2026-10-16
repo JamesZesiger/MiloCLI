@@ -267,6 +267,7 @@ const handle = (msg: SDKMessage) => {
       push({ kind: 'note', text: `${outcome} · ${Math.max(1, Math.round(ms / 1000))}s${cost}`, tone: ok ? 'dim' : 'error' })
       setState({ busy: false, mood: ok ? 'idle' : 'error', status: outcome, lastTurnMs: ms, currentTool: undefined })
       refreshContext()
+      if (movedTo) follow()
       const next = queued.shift()
       if (next !== undefined) submit(next)
       return
@@ -397,6 +398,38 @@ export const restart = async (resume?: string) => {
     sessionId: undefined,
   })
   start(resume, MODES.includes(mode) ? mode : undefined)
+}
+
+// --- Following the command line's folder ---------------------------------
+
+// Claude Code's working folder is fixed when it starts, so a new folder means
+// restarting it there on the same conversation. Mid-turn, that waits for the turn to end.
+let movedTo: string | undefined
+
+const follow = () => {
+  const dir = movedTo
+  movedTo = undefined
+  if (!dir || dir === process.cwd()) return
+  try {
+    process.chdir(dir)
+  } catch (err) {
+    push({ kind: 'note', text: `Couldn't move to ${dir}: ${err instanceof Error ? err.message : String(err)}`, tone: 'error' })
+    return
+  }
+  const { sessionId, mode } = getState()
+  close()
+  agentCalls.clear()
+  tasks.clear()
+  setState({ agents: 0 })
+  start(sessionId, MODES.includes(mode as PermissionMode) ? (mode as PermissionMode) : undefined)
+  push({ kind: 'note', text: `Now working in ${dir}`, tone: 'dim' })
+}
+
+/** Moves Claude Code to `dir`, once any reply in progress has finished. */
+export const moveTo = (dir: string) => {
+  movedTo = dir
+  if (getState().busy) push({ kind: 'note', text: `Moving to ${dir} once this reply ends`, tone: 'dim' })
+  else follow()
 }
 
 export { MODES }
