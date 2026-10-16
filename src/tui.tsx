@@ -105,38 +105,83 @@ const seconds = (ms: number) => {
 const shortPath = (path: string, max: number) =>
   path.length > max ? `…${path.slice(path.length - max + 1)}` : path
 
+/** How a panel's border shows what Claude is up to: a streak circling it while working, all lit while waiting on you. */
+type Glow = { kind: 'working' | 'waiting'; frame: number } | undefined
+
+type Paint = (text: string) => string
+const plain: Paint = text => text
+const GLOW_HEAD: Paint = text => c.bold(c.orange(text))
+const GLOW_BODY: Paint = c.orange
+const GLOW_TAIL: Paint = text => c.dim(c.orange(text))
+const LAP_FRAMES = 40 // frames for the streak to go once around, at 120ms a frame
+
+/** Colors each character, one escape sequence per run of the same paint. */
+const paintRun = (chars: string[], paints: Paint[]) => {
+  let out = ''
+  for (let i = 0; i < chars.length; ) {
+    let j = i
+    while (j < chars.length && paints[j] === paints[i]) j++
+    out += paints[i]!(chars.slice(i, j).join(''))
+    i = j
+  }
+  return out
+}
+
 /** A round-bordered box with its name set into the top edge; cyan while it has the keyboard. */
 const Panel = ({
   label,
   width,
   height,
   focused = false,
+  glow,
   children,
 }: {
   label: string
   width: number
   height: number
   focused?: boolean
+  glow?: Glow
   children: React.ReactNode
 }) => {
-  const edge = focused ? c.cyan : (text: string) => text
+  const w = Math.max(2, width)
+  const h = Math.max(3, height)
+  const base = focused ? c.cyan : plain
+  // Border cells are numbered clockwise from the top-left corner.
+  const perimeter = 2 * (w - 1) + 2 * (h - 1)
+  const step = Math.max(1, Math.round(perimeter / LAP_FRAMES))
+  const length = Math.max(6, Math.round(perimeter / 10))
+  const head = glow ? (glow.frame * step) % perimeter : 0
+  const paint = (i: number): Paint => {
+    if (!glow) return base
+    if (glow.kind === 'waiting') return GLOW_HEAD
+    const behind = (head - i + perimeter) % perimeter
+    return behind >= length ? base : behind < length / 3 ? GLOW_HEAD : behind < (2 * length) / 3 ? GLOW_BODY : GLOW_TAIL
+  }
+  const range = (count: number, at: (k: number) => number) => Array.from({ length: count }, (_, k) => paint(at(k)))
+
   const name = ` ${label} `
-  const top = `${edge('╭─')}${c.bold(name)}${edge(`${'─'.repeat(Math.max(0, width - 3 - name.length))}╮`)}`
+  const fill = Math.max(0, w - 3 - name.length)
+  const topChars = ['╭', '─', ...' '.repeat(name.length), ...'─'.repeat(fill), '╮']
+  const topPaints = range(topChars.length, k => k)
+  const top = `${paintRun(topChars.slice(0, 2), topPaints.slice(0, 2))}${c.bold(name)}${paintRun(topChars.slice(2 + name.length), topPaints.slice(2 + name.length))}`
+  const bottom = paintRun(['╰', ...'─'.repeat(w - 2), '╯'], range(w, k => w - 1 + h - 1 + (w - 1 - k)))
+  const right = range(h - 2, k => w - 1 + 1 + k).map(p => p('│'))
+  const left = range(h - 2, k => perimeter - 1 - k).map(p => p('│'))
   return (
-    <Box flexDirection="column" width={width} height={height}>
+    <Box flexDirection="column" width={w} height={h}>
       <Text wrap="truncate">{top}</Text>
-      <Box
-        borderStyle="round"
-        borderTop={false}
-        borderColor={focused ? 'cyan' : undefined}
-        width={width}
-        height={Math.max(1, height - 1)}
-        flexDirection="column"
-        paddingX={1}
-        overflow="hidden"
-      >
-        {children}
+      <Box height={h - 2}>
+        <Box width={1} flexShrink={0}>
+          <Text>{left.join('\n')}</Text>
+        </Box>
+        <Box width={w - 2} flexDirection="column" paddingX={1} overflow="hidden">
+          {children}
+        </Box>
+        <Box width={1} flexShrink={0}>
+          <Text>{right.join('\n')}</Text>
+        </Box>
       </Box>
+      <Text wrap="truncate">{bottom}</Text>
     </Box>
   )
 }
@@ -249,6 +294,7 @@ const Workspace = ({
   first,
   offset,
   selection,
+  glow,
 }: {
   width: number
   height: number
@@ -256,6 +302,7 @@ const Workspace = ({
   first: number
   offset: number
   selection: Selection | undefined
+  glow: Glow
 }) => {
   const innerHeight = Math.max(1, height - 2)
   let view: string[]
@@ -269,7 +316,7 @@ const Workspace = ({
     if (offset > 0) view[view.length - 1] = c.dim(`── ${offset} more line${offset === 1 ? '' : 's'} below · PgDn ──`)
   }
   return (
-    <Panel label="Workspace" width={width} height={height}>
+    <Panel label="Workspace" width={width} height={height} glow={glow}>
       {view.map((line, i) => (
         <Text key={i} wrap="truncate">
           {line || ' '}
@@ -405,7 +452,7 @@ const TerminalView = ({
 
 // --- Diff: old and new side by side ----------------------------------------
 
-const DiffView = ({ width, height, diff, scroll }: { width: number; height: number; diff: Diff; scroll: number }) => {
+const DiffView = ({ width, height, diff, scroll, glow }: { width: number; height: number; diff: Diff; scroll: number; glow: Glow }) => {
   const rows = useMemo(() => align(diff.before, diff.after), [diff])
   const gap = 2
   const paneWidth = Math.floor((width - gap) / 2)
@@ -425,7 +472,7 @@ const DiffView = ({ width, height, diff, scroll }: { width: number; height: numb
   }
 
   const pane = (title: string, side: 'left' | 'right') => (
-    <Panel label="Diff" width={paneWidth} height={height}>
+    <Panel label="Diff" width={paneWidth} height={height} glow={glow}>
       <Text wrap="truncate">{title}</Text>
       {visible.map((row, i) => (
         <Text key={i} wrap="truncate">
@@ -612,6 +659,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const editorGutter = doc ? String(doc.lines.length).length + 1 : 0
   const editorWidth = Math.max(1, innerWidth - editorGutter)
   const dirty = useMemo(() => !!doc && isDirty(doc), [doc?.lines, doc?.saved])
+  const glow: Glow = s.pending ? { kind: 'waiting', frame } : s.busy ? { kind: 'working', frame } : undefined
 
   // Claude may have changed files by the end of each turn. The open file
   // follows unless it has unsaved changes.
@@ -1108,7 +1156,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
           />
         )}
         {diff ? (
-          <DiffView width={mainWidth} height={workspaceHeight} diff={diff} scroll={diffScroll} />
+          <DiffView width={mainWidth} height={workspaceHeight} diff={diff} scroll={diffScroll} glow={glow} />
         ) : shellMode ? (
           <Box flexDirection="column" width={mainWidth}>
             {showEditor && <EditorView width={mainWidth} height={editorBoxHeight} doc={doc} dirty={dirty} focused={focus === 'editor'} />}
@@ -1124,6 +1172,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
             first={first}
             offset={offset}
             selection={selection}
+            glow={glow}
           />
         )}
       </Box>

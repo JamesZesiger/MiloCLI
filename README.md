@@ -43,6 +43,10 @@ Type a prompt and press Enter. Messages sent while Claude is busy wait their
 turn. Image files named in a prompt, typed or dragged in, are sent as pictures,
 and Ctrl+V or Alt+V pastes an image from the clipboard.
 
+While Claude works, an orange streak circles the workspace border. When Claude
+is waiting on you to approve something or answer a question, the whole border
+lights up.
+
 When Claude wants to run a tool or edit a file, Milo asks first and shows the
 change side by side. Shift+Tab cycles the permission mode: Default, Accept
 edits, Plan and Auto.
