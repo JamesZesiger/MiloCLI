@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, render, useApp, useInput, usePaste, useStdin, useStdout, useWindowSize } from 'ink'
 import wrapAnsi from 'wrap-ansi'
 import stringWidth from 'string-width'
-import { relative } from 'node:path'
+import { basename, relative } from 'node:path'
 import { c, type Mood } from './milo.js'
 import { portrait, type Size } from './portrait.js'
 import { align } from './diff.js'
@@ -12,13 +12,19 @@ import { logLines } from './render.js'
 import { highlight, isEmpty, selectedText, type Selection } from './select.js'
 import { completion, settingsCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
 import { pasteImage } from './images.js'
+import { treeRows, type Row } from './explorer.js'
+import { appendOutput, changeDir, completeCommand, loadCommands, runCommand, stopCommand } from './terminal.js'
+import { clickAt, column, editorKey, follow, insertText, isDirty, openDoc, reload, renderLine, save, type Doc } from './editor.js'
 import { getState, push, setState, useStore, type Diff, type State } from './store.js'
 import * as session from './session.js'
 import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
 import type { SDKSessionInfo } from '@anthropic-ai/claude-agent-sdk'
+import type { ChildProcess } from 'node:child_process'
 
 const HEADER_HEIGHT = 8
-const FRAMES = ['·', '✢', '✳', '✶', '✻', '✽']
+// How long a status-line notice shows, and so how long "press again to…" waits.
+const NOTICE_MS = 3000
+const FRAMES = ['·', '✢', '✺', '✶', '✻', '✽'] // text characters only: ✳ shows as a green emoji in some terminals
 
 const FACES: Record<Mood, string> = {
   idle: '|ᐠ｡ꞈ｡ᐟ|',
@@ -55,12 +61,30 @@ const HELP = [
   '  Tab            finish the command you are typing',
   '  PgUp / PgDn    scroll the workspace or the diff (the mouse wheel works too)',
   '  Ctrl+O         show or hide the last file change',
+  '  Ctrl+B         show or hide the file explorer',
   '  Ctrl+V / Alt+V paste an image from the clipboard',
   '  Drag           select text in the workspace; letting go copies it',
   '  Shift+Tab      switch permission mode',
   '  Esc            stop a reply, or close the diff',
+  '  Ctrl+C         stop a reply (twice forces it), clear the input, or leave (press twice)',
+  c.bold('File explorer'),
+  '  ↑ ↓ / letters  move, or jump to the next name starting with that letter',
+  '  → / ←          open or close a folder',
+  '  Enter / click  open or close a folder, or open a file in the editor',
+  '  Esc            back to the command line (click the explorer to return)',
+  c.bold('Command line (while the explorer is open)'),
+  '  Enter          run what you typed in your shell; output shows in the terminal pane',
+  '  Ctrl+C         stop the running command (twice kills it)',
+  '  Tab / →        finish a command or path (Tab again lists the choices)',
+  '  cd / clear     change folder, which the explorer follows / empty the pane',
+  '  ↑ ↓            earlier commands; PgUp / PgDn scroll the output',
+  c.bold('Editor'),
+  '  Ctrl+S         save the file',
+  '  Ctrl+W         close the file (twice drops unsaved changes)',
+  '  Ctrl+Z / Ctrl+Y undo / redo',
+  '  Ctrl+← / →     move by word; Ctrl+Home / End go to the start or end',
+  '  Esc            back to the explorer; Ctrl+B closes both and goes back to talking to Milo',
   'Image files named in a prompt (typed or dragged in) are sent as pictures.',
-  '  Ctrl+C         stop a reply (twice forces it), clear the input, or leave',
   'Anything else, including Claude Code commands like /model, /context, /compact and /usage, goes to Claude.',
   `Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`,
 ].join('\n')
@@ -81,6 +105,42 @@ const seconds = (ms: number) => {
 const shortPath = (path: string, max: number) =>
   path.length > max ? `…${path.slice(path.length - max + 1)}` : path
 
+/** A round-bordered box with its name set into the top edge; cyan while it has the keyboard. */
+const Panel = ({
+  label,
+  width,
+  height,
+  focused = false,
+  children,
+}: {
+  label: string
+  width: number
+  height: number
+  focused?: boolean
+  children: React.ReactNode
+}) => {
+  const edge = focused ? c.cyan : (text: string) => text
+  const name = ` ${label} `
+  const top = `${edge('╭─')}${c.bold(name)}${edge(`${'─'.repeat(Math.max(0, width - 3 - name.length))}╮`)}`
+  return (
+    <Box flexDirection="column" width={width} height={height}>
+      <Text wrap="truncate">{top}</Text>
+      <Box
+        borderStyle="round"
+        borderTop={false}
+        borderColor={focused ? 'cyan' : undefined}
+        width={width}
+        height={Math.max(1, height - 1)}
+        flexDirection="column"
+        paddingX={1}
+        overflow="hidden"
+      >
+        {children}
+      </Box>
+    </Box>
+  )
+}
+
 // --- Mouse -----------------------------------------------------------------
 
 // Button-event mouse reporting (1002) in SGR encoding (1006): each press,
@@ -92,7 +152,7 @@ const MOUSE_REPORT = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g
 const WHEEL_LINES = 3
 
 type Mouse =
-  | { kind: 'wheel'; direction: -1 | 1 }
+  | { kind: 'wheel'; direction: -1 | 1; x: number; y: number }
   | { kind: 'press' | 'drag' | 'release'; x: number; y: number }
 
 // Ink drops mouse reports before they reach useInput, so peek at what it
@@ -112,7 +172,7 @@ const useMouse = (onMouse: (event: Mouse) => void) => {
           // Ignore the Shift/Meta/Ctrl bits; 66 and 67 are sideways scrolls.
           const b = Number(button) & ~(4 | 8 | 16)
           const at = { x: Number(x), y: Number(y) }
-          if (b === 64 || b === 65) handler.current({ kind: 'wheel', direction: b === 64 ? -1 : 1 })
+          if (b === 64 || b === 65) handler.current({ kind: 'wheel', direction: b === 64 ? -1 : 1, ...at })
           else if ((b & 3) !== 0) continue // only the left button selects
           else if (end === 'm') handler.current({ kind: 'release', ...at })
           else handler.current({ kind: b & 32 ? 'drag' : 'press', ...at })
@@ -202,20 +262,144 @@ const Workspace = ({
   if (!lines.length) {
     view = [
       c.dim('Ask Milo anything.'),
-      c.dim('PgUp/PgDn scrolls · drag to select and copy · Ctrl+O shows the last file change · Shift+Tab switches mode'),
+      c.dim('PgUp/PgDn scrolls · drag to select and copy · Ctrl+O shows the last file change · Ctrl+B browses files · Shift+Tab switches mode'),
     ]
   } else {
     view = lines.slice(first, first + innerHeight).map((line, i) => highlight(line, first + i, selection))
     if (offset > 0) view[view.length - 1] = c.dim(`── ${offset} more line${offset === 1 ? '' : 's'} below · PgDn ──`)
   }
   return (
-    <Box borderStyle="round" width={width} height={height} flexDirection="column" paddingX={1} overflow="hidden">
+    <Panel label="Workspace" width={width} height={height}>
       {view.map((line, i) => (
         <Text key={i} wrap="truncate">
           {line || ' '}
         </Text>
       ))}
+    </Panel>
+  )
+}
+
+// --- Explorer: the working folder as a tree --------------------------------
+
+// The explorer's box sits left of the workspace, its title on the first line
+// inside the border and the tree below.
+const EXPLORER_LEFT = 2 // screen column (1-based) of its left border
+const TREE_TOP = WORKSPACE_TOP + 1 // screen row of the tree's first row
+
+const Explorer = ({
+  root,
+  width,
+  height,
+  rows,
+  open,
+  picked,
+  top,
+  focused,
+}: {
+  width: number
+  height: number
+  root: string
+  rows: Row[]
+  open: ReadonlySet<string>
+  picked: number
+  top: number
+  focused: boolean
+}) => {
+  const inner = width - 4
+  const visible = rows.slice(top, top + Math.max(1, height - 3))
+  const title = `${c.bold(basename(root) || root)}${rows.length ? '' : c.dim(' (empty)')}`
+  return (
+    <Box borderStyle="round" borderColor={focused ? 'cyan' : undefined} width={width} height={height} flexDirection="column" paddingX={1} overflow="hidden">
+      <Text wrap="truncate">{title}</Text>
+      {visible.map((row, i) => {
+        const icon = row.dir ? (open.has(row.path) ? '▾ ' : '▸ ') : '  '
+        const text = `${'  '.repeat(row.depth)}${icon}${row.name}`
+        const line =
+          top + i !== picked
+            ? row.dir ? c.cyan(text) : text
+            : focused
+              ? c.inverse(text + ' '.repeat(Math.max(0, inner - stringWidth(text))))
+              : c.bold(text)
+        return (
+          <Text key={row.path} wrap="truncate">
+            {line}
+          </Text>
+        )
+      })}
     </Box>
+  )
+}
+
+// --- Editor: the open file -------------------------------------------------
+
+const EditorView = ({ width, height, doc, dirty, focused }: { width: number; height: number; doc: Doc; dirty: boolean; focused: boolean }) => {
+  const body = Math.max(1, height - 3)
+  const numWidth = String(doc.lines.length).length
+  const textWidth = Math.max(1, width - 4 - numWidth - 1)
+  const file = relative(process.cwd(), doc.path) || doc.path
+  const where = c.dim(`Ln ${doc.row + 1}, Col ${column(doc.lines[doc.row]!, doc.col) + 1}`)
+  const keys = c.dim(focused ? 'Ctrl+S save · Ctrl+W close · Esc files' : 'click to edit')
+  const title = `${c.bold(shortPath(file, Math.max(10, width - 50)))}${dirty ? c.orange(' ●') : ''}  ${where}  ${keys}`
+  return (
+    <Panel label="Editor" width={width} height={height} focused={focused}>
+      <Text wrap="truncate">{title}</Text>
+      {doc.lines.slice(doc.top, doc.top + body).map((line, i) => {
+        const n = doc.top + i
+        const number = String(n + 1).padStart(numWidth)
+        return (
+          <Text key={n} wrap="truncate">
+            {`${n === doc.row ? number : c.dim(number)} ${renderLine(line, doc.left, textWidth, focused && n === doc.row ? doc.col : undefined)}`}
+          </Text>
+        )
+      })}
+    </Panel>
+  )
+}
+
+// --- Terminal: the command line's output ----------------------------------
+
+const TerminalView = ({
+  width,
+  height,
+  lines,
+  scroll,
+  cwd,
+  running,
+  focused,
+}: {
+  width: number
+  height: number
+  lines: string[]
+  scroll: number
+  cwd: string
+  running: boolean
+  focused: boolean
+}) => {
+  const inner = Math.max(1, width - 4)
+  const body = Math.max(1, height - 3)
+  const wrapped = useMemo(
+    () => lines.flatMap(line => wrapAnsi(line.replaceAll('\r', '').replaceAll('\t', '    '), inner, { hard: true, trim: false }).split('\n')),
+    [lines, inner],
+  )
+  const offset = Math.min(scroll, Math.max(0, wrapped.length - body))
+  const start = Math.max(0, wrapped.length - offset - body)
+  let view = wrapped.slice(start, start + body)
+  if (!lines.length)
+    view = [
+      c.dim('Commands typed below run in your shell, and their output shows here.'),
+      c.dim('cd changes folder · clear empties this · Ctrl+C stops a command · Ctrl+B goes back to Milo'),
+    ]
+  else if (offset > 0) view[view.length - 1] = c.dim(`── ${offset} more line${offset === 1 ? '' : 's'} below · PgDn ──`)
+  const title = `${c.dim(shortPath(cwd, Math.max(10, width - 20)))}${running ? `  ${c.orange('running…')}` : ''}`
+  return (
+    <Panel label="Command" width={width} height={height} focused={focused}>
+      <Text wrap="truncate">{title}</Text>
+      {view.map((line, i) => (
+        <Text key={i} wrap="truncate">
+          {line || ' '}
+        </Text>
+      ))}
+    </Panel>
   )
 }
 
@@ -241,7 +425,7 @@ const DiffView = ({ width, height, diff, scroll }: { width: number; height: numb
   }
 
   const pane = (title: string, side: 'left' | 'right') => (
-    <Box borderStyle="round" width={paneWidth} height={height} flexDirection="column" paddingX={1} overflow="hidden">
+    <Panel label="Diff" width={paneWidth} height={height}>
       <Text wrap="truncate">{title}</Text>
       {visible.map((row, i) => (
         <Text key={i} wrap="truncate">
@@ -250,7 +434,7 @@ const DiffView = ({ width, height, diff, scroll }: { width: number; height: numb
             : cell(row.right, c.green, row.kind === 'add' || row.kind === 'change')}
         </Text>
       ))}
-    </Box>
+    </Panel>
   )
 
   const more = rows.length > bodyHeight ? c.dim(` · ${top + 1}–${top + visible.length} of ${rows.length}`) : ''
@@ -283,7 +467,7 @@ const StatusLine = ({ width, s, frame, now, notice }: { width: number; s: State;
 }
 
 /** The input box's lines: a permission prompt, a question, or what you type. */
-const inputLines = (s: State, input: string, cursor: number, width: number, ghost: string): string[] => {
+const inputLines = (s: State, input: string, cursor: number, width: number, ghost: string, prompt: string): string[] => {
   const inner = width - 2
   // Wrapped lines keep one space between them and the border.
   const fit = (text: string) =>
@@ -319,7 +503,7 @@ const inputLines = (s: State, input: string, cursor: number, width: number, ghos
       ...typed(` ${c.dim(`(${hint})`)} ${c.bold('❯')} `),
     ]
   }
-  return typed(` ${c.bold('❯')} `, ghost)
+  return typed(prompt, ghost)
 }
 
 const InputBox = ({ width, lines, mood }: { width: number; lines: string[]; mood: Mood }) => {
@@ -362,7 +546,24 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const [now, setNow] = useState(Date.now())
   const history = useRef<string[]>([])
   const historyAt = useRef(-1)
+  // The command line keeps its own history and half-typed line.
+  const shellHistory = useRef<string[]>([])
+  const stash = useRef({ input: '', cursor: 0 })
+  const [termLines, setTermLines] = useState<string[]>([])
+  const [termCwd, setTermCwd] = useState(process.cwd())
+  const [termScroll, setTermScroll] = useState(0)
+  const [job, setJob] = useState<{ child: ChildProcess; stopping: boolean }>()
   const listed = useRef<SDKSessionInfo[]>([])
+  const [explorerOpen, setExplorerOpen] = useState(false)
+  // Where keys go: the prompt, the explorer or the editor.
+  const [focus, setFocus] = useState<'input' | 'explorer' | 'editor'>('input')
+  const explorerFocused = focus === 'explorer'
+  const [doc, setDoc] = useState<Doc>()
+  const [openFolders, setOpenFolders] = useState<ReadonlySet<string>>(new Set())
+  const [explorerPath, setExplorerPath] = useState<string>()
+  const [explorerTop, setExplorerTop] = useState(0)
+  const [treeVersion, setTreeVersion] = useState(0)
+  const armed = useRef({ action: '', at: 0 })
 
   useEffect(() => {
     if (!s.busy) return
@@ -374,25 +575,70 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   }, [s.busy])
 
   const names = useMemo(() => [...new Set([...MILO_COMMANDS, ...s.commands])], [s.commands])
-  const ghost = !s.pending && cursor === input.length ? completion(input, names, OPTIONS) : ''
+  // With the explorer open, the input box is a command line.
+  const shellMode = explorerOpen
+  // Command names on PATH load in the background the first time the command line opens.
+  const [pathLoaded, setPathLoaded] = useState(false)
+  useEffect(() => {
+    if (shellMode) void loadCommands().then(() => setPathLoaded(true))
+  }, [shellMode])
+  const shellCompletion = useMemo(
+    () => (shellMode && cursor === input.length ? completeCommand(input, termCwd, shellHistory.current) : undefined),
+    [shellMode, input, cursor, termCwd, pathLoaded, treeVersion],
+  )
+  const ghost =
+    s.pending || cursor !== input.length ? '' : shellMode ? (shellCompletion?.ghost ?? '') : completion(input, names, OPTIONS)
+  const prompt = shellMode ? ` ${c.cyan(basename(termCwd) || termCwd)} ${c.bold('$')} ` : ` ${c.bold('❯')} `
   const boxWidth = Math.max(20, columns - 2)
-  const lines = inputLines(s, input, cursor, boxWidth, ghost)
+  const lines = inputLines(s, input, cursor, boxWidth, ghost, prompt)
   const inputHeight = lines.length + 2
   const workspaceHeight = Math.max(4, rows - HEADER_HEIGHT - 1 - inputHeight)
   const diff = s.showDiff ? (s.pending?.kind === 'permission' && s.pending.diff) || s.lastDiff : undefined
   const page = Math.max(1, workspaceHeight - 3)
-  const innerWidth = boxWidth - 4
+  const explorerWidth = explorerOpen ? Math.min(40, Math.max(18, Math.floor(boxWidth / 4))) : 0
+  const mainWidth = boxWidth - explorerWidth
+  const workspaceLeft = WORKSPACE_LEFT + explorerWidth
+  const innerWidth = mainWidth - 4
   const innerHeight = Math.max(1, workspaceHeight - 2)
   const log = useMemo(() => logLines(s.entries, innerWidth), [s.entries, innerWidth])
   const offset = Math.min(scroll, Math.max(0, log.length - innerHeight))
   const first = Math.max(0, log.length - offset - innerHeight)
+  const showEditor = shellMode && !diff && !!doc
+  // The terminal pane sits under the open file once there's output, or fills the space without one.
+  const showTerminal = shellMode && !diff && (!doc || termLines.length > 0 || !!job)
+  const terminalHeight = !showTerminal ? 0 : doc ? Math.min(workspaceHeight - 4, Math.max(5, Math.floor(workspaceHeight * 0.4))) : workspaceHeight
+  const editorBoxHeight = workspaceHeight - terminalHeight
+  const editorHeight = Math.max(1, editorBoxHeight - 3)
+  const editorGutter = doc ? String(doc.lines.length).length + 1 : 0
+  const editorWidth = Math.max(1, innerWidth - editorGutter)
+  const dirty = useMemo(() => !!doc && isDirty(doc), [doc?.lines, doc?.saved])
+
+  // Claude may have changed files by the end of each turn. The open file
+  // follows unless it has unsaved changes.
+  useEffect(() => {
+    if (s.busy) return
+    setTreeVersion(v => v + 1)
+    setDoc(d => d && reload(d))
+  }, [s.busy])
+  const tree = useMemo(
+    () => (explorerOpen ? treeRows(termCwd, openFolders) : []),
+    [explorerOpen, openFolders, treeVersion, termCwd],
+  )
+  const treeHeight = Math.max(1, workspaceHeight - 3)
+  const picked = Math.max(0, tree.findIndex(row => row.path === explorerPath))
+  const treeTop = Math.min(explorerTop, Math.max(0, tree.length - treeHeight))
+
+  // A question or permission prompt needs the keyboard.
+  useEffect(() => {
+    if (s.pending) setFocus('input')
+  }, [s.pending])
 
   // Rewrapping moves every line, and a fresh conversation drops them.
   useEffect(() => setSelection(undefined), [innerWidth, s.entries.length === 0])
 
   useEffect(() => {
     if (!notice) return
-    const timer = setTimeout(() => setNotice(''), 2000)
+    const timer = setTimeout(() => setNotice(''), NOTICE_MS)
     return () => clearTimeout(timer)
   }, [notice])
 
@@ -400,6 +646,114 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     setInput(text)
     setCursor(Math.max(0, Math.min(at, text.length)))
   }
+
+  /** Adds a word at the cursor, with spaces around it. */
+  const insert = (word: string) => {
+    const { input: text, cursor: at } = typing.current
+    const gap = at > 0 && !/\s/.test(text[at - 1]!) ? ' ' : ''
+    const added = `${gap}${word} `
+    edit(text.slice(0, at) + added + text.slice(at), at + added.length)
+  }
+
+  const warn = (text: string) => setNotice(c.orange(text))
+  /** True the second time `action` is asked for within a few seconds, for "press again to…". */
+  const confirmed = (action: string) => {
+    const ok = armed.current.action === action && Date.now() - armed.current.at < NOTICE_MS
+    armed.current = ok ? { action: '', at: 0 } : { action, at: Date.now() }
+    return ok
+  }
+  const docName = doc ? basename(doc.path) : ''
+  /**
+   * Leaves Milo. The first ask only warns when changes would be lost, or
+   * always with `askFirst`, as for Ctrl+C, which is easy to press by accident.
+   */
+  const quit = (askFirst = false) => {
+    if ((dirty || askFirst) && !confirmed('quit'))
+      return warn(dirty ? `${docName} isn't saved. Press again to leave anyway.` : 'Press Ctrl+C again to leave.')
+    exit()
+  }
+
+  // Closing the explorer shows the conversation again; the open file waits for it to reopen.
+  const toggleExplorer = () => {
+    // Chat and the command line each keep their own half-typed line.
+    const other = stash.current
+    stash.current = { input, cursor }
+    edit(other.input, other.cursor)
+    historyAt.current = -1
+    setExplorerOpen(!explorerOpen)
+    setFocus(explorerOpen ? 'input' : doc ? 'editor' : 'explorer')
+    if (explorerOpen && dirty) warn(`${docName} isn't saved yet. Ctrl+B brings it back.`)
+    else if (explorerOpen && job) setNotice('The command keeps running · Ctrl+B shows it again')
+    else if (!explorerOpen && !doc) setNotice('↑↓ move · Enter opens · Esc to the command line')
+  }
+  const openFile = (path: string) => {
+    if (doc?.path === path) return setFocus('editor')
+    if (dirty) return warn(`${docName} isn't saved: Ctrl+S saves it, Ctrl+W drops the changes.`)
+    const opened = openDoc(path)
+    if (typeof opened === 'string') return warn(opened)
+    setDoc(opened)
+    setFocus('editor')
+  }
+  const saveDoc = (current: Doc) => {
+    let result = save(current)
+    if ('conflict' in result && confirmed('save')) result = save(current, true)
+    if ('problem' in result) return warn(result.problem)
+    setDoc(result.doc)
+    setNotice(`Saved ${basename(current.path)}`)
+  }
+  const runShell = (text: string) => {
+    if (job) return warn('A command is still running. Ctrl+C stops it.')
+    if (text === 'clear' || text === 'cls') return setTermLines([])
+    const echo = `${c.cyan(basename(termCwd) || termCwd)} ${c.bold('$')} ${text}`
+    const moved = changeDir(text, termCwd)
+    if (moved) {
+      setTermLines(l => [...l, echo, ...('problem' in moved ? [c.red(moved.problem)] : [])])
+      // The explorer follows the command line into the new folder.
+      if ('cwd' in moved) {
+        setTermCwd(moved.cwd)
+        setExplorerTop(0)
+      }
+      return
+    }
+    setTermLines(l => [...l, echo, ''])
+    const started = Date.now()
+    const child = runCommand(
+      text,
+      termCwd,
+      chunk => setTermLines(l => appendOutput(l, chunk)),
+      (code, signal) => {
+        setJob(undefined)
+        const time = seconds(Date.now() - started)
+        const outcome = code === 0 ? c.green(`✓ done in ${time}`) : signal ? c.orange(`stopped after ${time}`) : c.red(`✗ exit ${code} after ${time}`)
+        setTermLines(l => [...(l.at(-1) === '' ? l.slice(0, -1) : l), outcome])
+        // The command may have changed files.
+        setTreeVersion(v => v + 1)
+        setDoc(d => d && reload(d))
+      },
+    )
+    setJob({ child, stopping: false })
+  }
+  const closeDoc = () => {
+    if (dirty && !confirmed('close')) return warn(`${docName} isn't saved. Ctrl+W again drops the changes.`)
+    setDoc(undefined)
+    setFocus('explorer')
+  }
+  /** Picks a row, scrolling the tree just enough to show it. */
+  const moveTo = (index: number) => {
+    const i = Math.max(0, Math.min(tree.length - 1, index))
+    const row = tree[i]
+    if (!row) return
+    setExplorerPath(row.path)
+    setExplorerTop(Math.min(i, Math.max(treeTop, i - treeHeight + 1)))
+  }
+  const toggleFolder = (path: string) =>
+    setOpenFolders(open => {
+      const next = new Set(open)
+      if (!next.delete(path)) next.add(path)
+      return next
+    })
+  /** A folder opens or closes; a file opens in the editor. */
+  const activate = (row: Row) => (row.dir ? toggleFolder(row.path) : openFile(row.path))
 
   const note = (text: string, tone: 'dim' | 'error' | 'raw' = 'raw') => push({ kind: 'note', text, tone })
   const ask = <T,>(work: (q: NonNullable<ReturnType<typeof session.current>>) => Promise<T>, show: (result: T) => string) => {
@@ -468,7 +822,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
         return true
       case '/exit':
       case '/quit':
-        exit()
+        quit()
         return true
       case '/settings': {
         const result = settingsCommand(text.slice(name!.length))
@@ -525,9 +879,13 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       return
     }
     if (!text) return
-    history.current.unshift(text)
+    ;(shellMode ? shellHistory : history).current.unshift(text)
     historyAt.current = -1
     edit('', 0)
+    if (shellMode) {
+      setTermScroll(0)
+      return runShell(text)
+    }
     setScroll(0)
     if (!command(text)) session.submit(text)
   }
@@ -536,19 +894,42 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const pointAt = (x: number, y: number) => {
     const shown = Math.min(innerHeight - (offset > 0 ? 1 : 0), log.length - first)
     const row = Math.max(0, Math.min(shown - 1, y - WORKSPACE_TOP))
-    return { line: first + row, col: Math.max(0, Math.min(innerWidth - 1, x - WORKSPACE_LEFT)) }
+    return { line: first + row, col: Math.max(0, Math.min(innerWidth - 1, x - workspaceLeft)) }
   }
   const inWorkspace = (x: number, y: number) =>
-    y >= WORKSPACE_TOP && y < WORKSPACE_TOP + innerHeight && x >= WORKSPACE_LEFT - 1 && x < WORKSPACE_LEFT + innerWidth + 1
+    y >= WORKSPACE_TOP && y < WORKSPACE_TOP + innerHeight && x >= workspaceLeft - 1 && x < workspaceLeft + innerWidth + 1
+  // The editor's box takes the top of the workspace, the terminal's the rest.
+  const inEditor = (x: number, y: number) => showEditor && inWorkspace(x, y) && y < WORKSPACE_TOP - 1 + editorBoxHeight - 1
+  const inExplorer = (x: number, y: number) =>
+    explorerOpen && x >= EXPLORER_LEFT && x < EXPLORER_LEFT + explorerWidth && y >= WORKSPACE_TOP - 1 && y < WORKSPACE_TOP - 1 + workspaceHeight
 
   useMouse(event => {
     if (event.kind === 'wheel') {
       const delta = event.direction * WHEEL_LINES
-      if (diff) setDiffScroll(v => Math.max(0, v + delta))
+      if (inExplorer(event.x, event.y)) setExplorerTop(Math.max(0, Math.min(tree.length - treeHeight, treeTop + delta)))
+      else if (inEditor(event.x, event.y)) setDoc(d => d && { ...d, top: Math.max(0, Math.min(d.lines.length - editorHeight, d.top + delta)) })
+      else if (diff) setDiffScroll(v => Math.max(0, v + delta))
+      else if (showTerminal) setTermScroll(v => Math.max(0, v - delta))
       else setScroll(v => Math.max(0, v - delta))
       return
     }
-    if (diff || !log.length) return
+    if (event.kind === 'press' && inExplorer(event.x, event.y)) {
+      setFocus('explorer')
+      const index = treeTop + event.y - TREE_TOP
+      const row = event.y >= TREE_TOP && index < Math.min(tree.length, treeTop + treeHeight) ? tree[index] : undefined
+      if (!row) return
+      setExplorerPath(row.path)
+      activate(row)
+      return
+    }
+    if (event.kind === 'press' && doc && inEditor(event.x, event.y)) {
+      setFocus('editor')
+      // The editor's first line is below its title.
+      setDoc(clickAt(doc, event.y - WORKSPACE_TOP - 1, event.x - workspaceLeft - editorGutter))
+      return
+    }
+    if (event.kind === 'press') setFocus('input')
+    if (diff || shellMode || !log.length) return
     if (event.kind === 'press') {
       dragging.current = inWorkspace(event.x, event.y)
       const at = pointAt(event.x, event.y)
@@ -568,6 +949,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   })
 
   usePaste(text => {
+    if (focus === 'editor' && doc) return setDoc(follow(insertText(doc, text, false), editorHeight, editorWidth))
     const clean = text.replace(/\r\n?/g, '\n')
     edit(input.slice(0, cursor) + clean + input.slice(cursor), cursor + clean.length)
   })
@@ -577,9 +959,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     const asking = state.pending
 
     if (key.ctrl && ch === 'c') {
-      if (state.busy) session.interrupt()
-      else if (input) edit('', 0)
-      else exit()
+      if (shellMode && job) {
+        stopCommand(job.child, job.stopping)
+        setJob(j => j && { ...j, stopping: true })
+      } else if (state.busy) session.interrupt()
+      else if (input && focus === 'input') edit('', 0)
+      else quit(true)
       return
     }
     if (key.ctrl && ch === 'o') {
@@ -590,9 +975,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       }
       return
     }
-    if (key.pageUp || key.pageDown) {
+    if (key.ctrl && ch === 'b') return toggleExplorer()
+    if ((key.pageUp || key.pageDown) && focus !== 'editor') {
       const delta = key.pageUp ? -page : page
-      if (diff) setDiffScroll(v => Math.max(0, v + delta))
+      if (explorerFocused) moveTo(picked + (key.pageUp ? -treeHeight : treeHeight))
+      else if (diff) setDiffScroll(v => Math.max(0, v + delta))
+      else if (showTerminal) setTermScroll(v => Math.max(0, v - delta))
       else setScroll(v => Math.max(0, v - delta))
       return
     }
@@ -602,6 +990,43 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       else if (k === 'a') asking.resolve('always')
       else if (k === 'n' || key.escape) asking.resolve('no')
       return
+    }
+    if (focus === 'editor' && doc) {
+      if (key.escape) return setFocus('explorer')
+      if (key.ctrl && ch === 's') return saveDoc(doc)
+      if (key.ctrl && ch === 'w') return closeDoc()
+      const next = editorKey(doc, ch, key, editorHeight)
+      if (next) return setDoc(follow(next, editorHeight, editorWidth))
+      // Keep other keys from the prompt; Shift+Tab still switches mode.
+      if (!(key.tab && key.shift)) return
+    }
+    if (explorerFocused) {
+      const row = tree[picked]
+      if (key.escape) return setFocus('input')
+      if (key.upArrow) return moveTo(picked - 1)
+      if (key.downArrow) return moveTo(picked + 1)
+      if (key.home) return moveTo(0)
+      if (key.end) return moveTo(tree.length - 1)
+      if (key.return || ch === ' ') return row && activate(row)
+      if (key.rightArrow && row?.dir) {
+        if (!openFolders.has(row.path)) return toggleFolder(row.path)
+        if ((tree[picked + 1]?.depth ?? 0) > row.depth) moveTo(picked + 1)
+        return
+      }
+      if (key.leftArrow && row) {
+        if (row.dir && openFolders.has(row.path)) return toggleFolder(row.path)
+        const parent = tree.findLastIndex((r, i) => i < picked && r.depth < row.depth)
+        if (parent >= 0) moveTo(parent)
+        return
+      }
+      // A letter jumps to the next name starting with it.
+      if (ch && !key.ctrl && !key.meta && /^\S$/.test(ch)) {
+        const starts = (r: Row) => r.name.toLowerCase().startsWith(ch.toLowerCase())
+        const next = tree.findIndex((r, i) => i > picked && starts(r))
+        return moveTo(next >= 0 ? next : tree.findIndex(starts))
+      }
+      // Keep other typing out of the hidden input; Shift+Tab and Ctrl keys still work.
+      if (!key.ctrl && !key.meta && !(key.tab && key.shift)) return
     }
     if (key.tab && key.shift) {
       void session.cycleMode()
@@ -616,20 +1041,27 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       setNotice('Checking the clipboard…')
       void pasteImage().then(file => {
         if (!file) return setNotice('No image on the clipboard')
-        // The clipboard takes a moment, so insert where the cursor is now.
-        const { input: text, cursor: at } = typing.current
-        const gap = at > 0 && !/\s/.test(text[at - 1]!) ? ' ' : ''
-        const added = `${gap}${file} `
-        edit(text.slice(0, at) + added + text.slice(at), at + added.length)
+        // The clipboard takes a moment; insert uses where the cursor is now.
+        insert(file)
         setNotice('Image pasted')
       })
       return
     }
     if (key.ctrl && ch === 'd') {
-      if (!input) exit()
+      if (!input) quit()
       return
     }
     if (ghost && (key.tab || key.rightArrow)) return edit(input + ghost, input.length + ghost.length)
+    // Tab with nothing more to add lists what could come next, as shells do.
+    if (shellMode && key.tab && !key.shift) {
+      const choices = shellCompletion?.choices ?? []
+      if (!choices.length) return
+      const names = choices.map(choice => choice.trimEnd().replace(/^.*\/(?=.)/, ''))
+      const shown = names.slice(0, 200).join('  ') + (names.length > 200 ? c.dim(`  …and ${names.length - 200} more`) : '')
+      setTermLines(l => [...l, `${c.cyan(basename(termCwd) || termCwd)} ${c.bold('$')} ${input}`, c.dim(shown)])
+      setTermScroll(0)
+      return
+    }
     if (key.return) return submit()
     // Most terminals send Backspace as DEL, which Ink reports as delete.
     if (key.backspace || key.delete) {
@@ -642,10 +1074,11 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     if (key.end || (key.ctrl && ch === 'e')) return setCursor(input.length)
     if (key.ctrl && ch === 'u') return edit('', 0)
     if (key.upArrow || key.downArrow) {
+      const past = (shellMode ? shellHistory : history).current
       const next = historyAt.current + (key.upArrow ? 1 : -1)
-      if (next < -1 || next >= history.current.length) return
+      if (next < -1 || next >= past.length) return
       historyAt.current = next
-      const text = next === -1 ? '' : history.current[next]!
+      const text = next === -1 ? '' : past[next]!
       return edit(text, text.length)
     }
     if (ch && !key.ctrl && !key.meta && !key.tab) {
@@ -661,11 +1094,30 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
         <Header width={boxWidth} s={s} />
       </Box>
       <Box paddingX={1}>
+        {explorerOpen && (
+          <Explorer
+            root={termCwd}
+            width={explorerWidth}
+            height={workspaceHeight}
+            rows={tree}
+            open={openFolders}
+            picked={picked}
+            top={treeTop}
+            focused={explorerFocused}
+          />
+        )}
         {diff ? (
-          <DiffView width={boxWidth} height={workspaceHeight} diff={diff} scroll={diffScroll} />
+          <DiffView width={mainWidth} height={workspaceHeight} diff={diff} scroll={diffScroll} />
+        ) : shellMode ? (
+          <Box flexDirection="column" width={mainWidth}>
+            {showEditor && <EditorView width={mainWidth} height={editorBoxHeight} doc={doc} dirty={dirty} focused={focus === 'editor'} />}
+            {showTerminal && (
+              <TerminalView width={mainWidth} height={terminalHeight} lines={termLines} scroll={termScroll} cwd={termCwd} running={!!job} focused={focus === 'input'} />
+            )}
+          </Box>
         ) : (
           <Workspace
-            width={boxWidth}
+            width={mainWidth}
             height={workspaceHeight}
             lines={log}
             first={first}

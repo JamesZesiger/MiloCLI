@@ -42,7 +42,7 @@ const send = (content: Content) => {
 
 // --- Spinner ---------------------------------------------------------------
 
-const FRAMES = ['·', '✢', '✳', '✶', '✻', '✽']
+const FRAMES = ['·', '✢', '✺', '✶', '✻', '✽'] // text characters only: ✳ shows as a green emoji in some terminals
 let spinner: NodeJS.Timeout | undefined
 
 const stopSpinner = () => {
