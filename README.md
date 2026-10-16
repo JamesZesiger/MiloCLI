@@ -1,0 +1,133 @@
+# Milo
+
+Milo is a cat-themed terminal front end for Claude Code. Claude Code runs in the
+background through the Claude Agent SDK, and Milo gives it a full-screen home:
+a chat workspace, a file explorer, a code editor and a command line, with a cat
+who reacts as Claude thinks and works.
+
+## Requirements
+
+- Node.js 20 or later
+- Claude Code signed in on this machine (or `ANTHROPIC_API_KEY` set). Milo uses
+  the same account, settings, skills and subagents as Claude Code.
+
+## Getting started
+
+```sh
+npm install
+npm start          # build, then run Milo
+```
+
+To run `milo` from any folder:
+
+```sh
+npm run build
+npm link
+milo
+```
+
+Milo works in the folder you start it from. In a terminal it runs full screen;
+when piped, or with `--plain`, it runs line by line.
+
+| Script              | What it does                                    |
+| ------------------- | ----------------------------------------------- |
+| `npm start`         | Build and run                                   |
+| `npm run dev`       | Run from source with `tsx`, no build step       |
+| `npm run build`     | Typecheck and bundle to `dist/milo.js`          |
+| `npm run typecheck` | Typecheck only                                  |
+| `npm run frame`     | Print one frame of the app with sample content; pass `-- [columns] [rows]` to set the size |
+
+## Talking to Milo
+
+Type a prompt and press Enter. Messages sent while Claude is busy wait their
+turn. Image files named in a prompt, typed or dragged in, are sent as pictures,
+and Ctrl+V or Alt+V pastes an image from the clipboard.
+
+When Claude wants to run a tool or edit a file, Milo asks first and shows the
+change side by side. Shift+Tab cycles the permission mode: Default, Accept
+edits, Plan and Auto.
+
+### Commands
+
+| Command          | What it does                                                   |
+| ---------------- | -------------------------------------------------------------- |
+| `/help`          | Show commands and keys                                         |
+| `/commands`      | List every Claude Code command and skill you can use           |
+| `/resume [n]`    | List recent conversations in this folder, or pick one up       |
+| `/continue`      | Pick up the most recent conversation in this folder            |
+| `/status`        | Show the folder, session, model, mode and account              |
+| `/mode [name]`   | Show or switch the permission mode                             |
+| `/agents`        | List the subagents Claude can use                              |
+| `/milo [size]`   | Show Milo: `small` or `big`, or `thinking`, `working`, `error` |
+| `/diff`          | Show or hide the last file change                              |
+| `/copy [n]`      | Copy the last reply, or the nth from last, to the clipboard    |
+| `/settings`      | Show Milo's settings, or save one                              |
+| `/new`           | Start a fresh conversation                                     |
+| `/exit`          | Leave                                                          |
+
+Anything else, including Claude Code commands like `/model`, `/context`,
+`/compact` and `/usage`, goes straight to Claude.
+
+### Keys
+
+| Key            | What it does                                                    |
+| -------------- | --------------------------------------------------------------- |
+| Tab            | Finish the command you're typing                                |
+| PgUp / PgDn    | Scroll the workspace or the diff (the mouse wheel works too)    |
+| Ctrl+O         | Show or hide the last file change                               |
+| Ctrl+B         | Show or hide the file explorer                                  |
+| Drag           | Select text in the workspace; letting go copies it              |
+| Esc            | Stop a reply, or close the diff                                 |
+| Ctrl+C         | Stop a reply (twice forces it), clear the input, or leave (twice) |
+
+## File explorer, editor and command line
+
+Ctrl+B opens the explorer beside the workspace, and the input box becomes a
+command line.
+
+- **Explorer:** arrow keys or letters to move, → and ← to open and close
+  folders, Enter or a click to open a file.
+- **Editor:** Ctrl+S saves, Ctrl+W closes, Ctrl+Z and Ctrl+Y undo and redo.
+  An open file reloads when Claude changes it, unless it has unsaved changes.
+- **Command line:** commands run in your shell, with output in the terminal
+  pane. Tab completes commands and paths, ↑ and ↓ go through earlier commands,
+  and Ctrl+C stops a running command.
+
+A plain `cd` moves the explorer and Claude Code to the new folder, keeping the
+same conversation. If Claude is mid-reply, the move happens when the reply ends.
+
+Esc steps back from the editor to the explorer to the command line. Ctrl+B
+closes them and goes back to talking to Milo.
+
+## Settings
+
+Milo's own settings live in `~/.milo/settings.toml`, one `key = "value"` per
+line. Claude Code's settings stay in `~/.claude`.
+
+| Setting        | Meaning                                                      |
+| -------------- | ------------------------------------------------------------ |
+| `default_mode` | The permission mode Milo starts in: Default, Accept edits, Plan or Auto |
+
+Set one from inside Milo with `/settings default_mode Auto`.
+
+## Project layout
+
+```
+src/
+  index.ts      entry point: full screen or plain mode
+  tui.tsx       the full-screen app (Ink)
+  plain.ts      line-by-line mode
+  session.ts    the background Claude Code session
+  commands.ts   Milo's slash commands
+  explorer.ts   the file tree
+  editor.ts     the code editor
+  terminal.ts   the command line: running commands, cd and completion
+  images.ts     images in prompts and from the clipboard
+  settings.ts   ~/.milo/settings.toml
+  milo.ts       Milo's persona, faces and colors
+  portrait.ts   Milo's portrait
+build/
+  bundle.mjs    bundles the app into dist/milo.js with esbuild
+```
+
+Built by CU*Answers.
