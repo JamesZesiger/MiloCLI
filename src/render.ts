@@ -13,12 +13,12 @@ const markdown = (text: string) =>
     .split('\n')
     .map(line =>
       /^#{1,6} /.test(line)
-        ? c.bold(c.orange(line.replace(/^#+ /, '')))
-        : line.replace(/\*\*([^*\n]+)\*\*/g, (_, s: string) => c.bold(s)).replace(/`([^`\n]+)`/g, (_, s: string) => c.cyan(s)),
+        ? c.bold(c.accent(line.replace(/^#+ /, '')))
+        : line.replace(/\*\*([^*\n]+)\*\*/g, (_, s: string) => c.bold(s)).replace(/`([^`\n]+)`/g, (_, s: string) => c.focus(s)),
     )
     .join('\n')
 
-const ICONS = { running: c.dim('⋯'), done: c.green('✓'), error: c.red('✗') }
+const ICONS = { running: c.dim('⋯'), done: c.ok('✓'), error: c.error('✗') }
 
 const linesFor = (entry: Entry, width: number, labelled: boolean): string[] => {
   switch (entry.kind) {
@@ -29,16 +29,16 @@ const linesFor = (entry: Entry, width: number, labelled: boolean): string[] => {
         ...(entry.images ?? []).flatMap(image => wrap(c.dim(`  🖼  ${basename(image)}`), width)),
       ]
     case 'assistant':
-      return [...(labelled ? ['', c.bold(c.orange('Milo'))] : []), ...wrap(markdown(entry.text.trim()), width)]
+      return [...(labelled ? ['', c.bold(c.accent('Milo'))] : []), ...wrap(markdown(entry.text.trim()), width)]
     case 'tool': {
       const head = wrap(`  ${ICONS[entry.status]} ${c.bold(entry.name)}  ${c.dim(entry.detail)}`, width)
       if (!entry.error) return head
-      const error = entry.error.split('\n').slice(0, 3).map(line => c.red(`    ${line}`))
+      const error = entry.error.split('\n').slice(0, 3).map(line => c.error(`    ${line}`))
       return [...head, ...error.flatMap(line => wrap(line, width))]
     }
     case 'note':
       if (entry.tone === 'raw') return entry.text.split('\n')
-      return wrap(entry.tone === 'error' ? c.red(entry.text) : c.dim(entry.text), width)
+      return wrap(entry.tone === 'error' ? c.error(entry.text) : c.dim(entry.text), width)
   }
 }
 

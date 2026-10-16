@@ -4,6 +4,7 @@ import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { findTheme, setTheme, THEME_NAMES, type ThemeName } from './theme.js'
 
 export const SETTINGS_FILE = join(homedir(), '.milo', 'settings.toml')
 
@@ -14,10 +15,14 @@ const TEMPLATE = `# Milo settings. Each line looks like: key = "value"
 
 # The permission mode Milo starts in: Default, Accept edits, Plan or Auto.
 # default_mode = "Auto"
+
+# Milo's colors: ${THEME_NAMES.join(', ')}. /theme shows them.
+# theme = "milo"
 `
 
 export type Settings = {
   defaultMode?: PermissionMode
+  theme?: ThemeName
 }
 
 /** Matches "Auto", "auto mode", "accept_edits", "acceptEdits" and so on. */
@@ -37,6 +42,15 @@ const KNOWN: Record<string, Known> = {
       const mode = parseMode(value)
       if (!mode) return 'default_mode should be Default, Accept edits, Plan or Auto'
       into.defaultMode = mode
+    },
+  },
+  theme: {
+    about: `Milo's colors: ${THEME_NAMES.join(', ')}`,
+    get: from => from.theme,
+    apply: (value, into) => {
+      const theme = findTheme(value)
+      if (!theme) return `theme should be one of ${THEME_NAMES.join(', ')}`
+      into.theme = theme
     },
   },
 }
@@ -79,6 +93,7 @@ const load = (): { settings: Settings; problems: string[] } => {
 }
 
 export const { settings, problems: settingsProblems } = load()
+if (settings.theme) setTheme(settings.theme)
 
 /**
  * Saves one setting to the file and to the running settings. Replaces the
@@ -106,6 +121,8 @@ export const saveSetting = (key: string, value: string): string | void => {
     return `Couldn't save ${SETTINGS_FILE}: ${err instanceof Error ? err.message : String(err)}`
   }
   Object.assign(settings, updated)
+  // A new theme shows at once; the other settings wait for the next start.
+  if (key === 'theme' && updated.theme) setTheme(updated.theme)
 }
 
 /** Every setting, its value (or "not set") and what it means. */

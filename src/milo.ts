@@ -1,4 +1,5 @@
 // Milo's look: ASCII art, colors and the words the spinner cycles through.
+import { sgr, shade, type Role, type Shade } from './theme.js'
 
 export type Mood = 'idle' | 'thinking' | 'working' | 'error'
 
@@ -14,17 +15,22 @@ export const face = (mood: Mood): string[] => [
 
 export const small = (mood: Mood): string => `=^${EYES[mood].replace(' ', '')}^=`
 
-const color = (code: number) => (text: string) =>
-  process.stdout.isTTY && !process.env.NO_COLOR ? `\x1b[${code}m${text}\x1b[0m` : text
+const colorOn = () => process.stdout.isTTY && !process.env.NO_COLOR
+const style = (code: string) => (text: string) => (colorOn() ? `\x1b[${code}m${text}\x1b[0m` : text)
+// Each role takes its shade from the current theme as it paints, so a new theme shows at once.
+const role = (name: Role) => (text: string) => style(sgr(shade(name)))(text)
+
+/** Paints text in a shade, as /theme does to show a theme's colors. */
+export const paint = (color: Shade, text: string) => style(sgr(color))(text)
 
 export const c = {
-  orange: color(33),
-  dim: color(2),
-  bold: color(1),
-  red: color(31),
-  green: color(32),
-  cyan: color(36),
-  inverse: color(7),
+  accent: role('accent'),
+  focus: role('focus'),
+  ok: role('ok'),
+  error: role('error'),
+  dim: style('2'),
+  bold: style('1'),
+  inverse: style('7'),
 }
 
 export const VERBS = [

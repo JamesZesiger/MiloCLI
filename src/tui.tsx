@@ -10,7 +10,7 @@ import { portrait, type Size } from './portrait.js'
 import { align } from './diff.js'
 import { logLines } from './render.js'
 import { highlight, isEmpty, selectedText, type Selection } from './select.js'
-import { completion, settingsCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
+import { completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
 import { pasteImage } from './images.js'
 import { treeRows, type Row } from './explorer.js'
 import { appendOutput, changeDir, completeCommand, loadCommands, runCommand, stopCommand } from './terminal.js'
@@ -18,6 +18,7 @@ import { clickAt, column, editorKey, follow, insertText, isDirty, openDoc, reloa
 import { getState, push, setState, useStore, type Diff, type State } from './store.js'
 import * as session from './session.js'
 import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
+import { shade, THEME_NAMES } from './theme.js'
 import type { SDKSessionInfo } from '@anthropic-ai/claude-agent-sdk'
 import type { ChildProcess } from 'node:child_process'
 
@@ -55,6 +56,7 @@ const HELP = [
   '  /diff          show or hide the last file change',
   '  /copy [n]      copy the last reply, or the nth from last, to the clipboard',
   '  /settings      show Milo\'s settings, or save one: /settings default_mode Auto',
+  '  /theme [name]  list the color themes, or switch to one',
   '  /new           start a fresh conversation',
   '  /exit          leave',
   c.bold('Keys'),
@@ -90,11 +92,12 @@ const HELP = [
 ].join('\n')
 
 // Milo's own commands, suggested ahead of Claude Code's, and their options.
-const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'status', 'mode', 'agents', 'milo', 'diff', 'copy', 'settings', 'new', 'exit']
+const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'status', 'mode', 'agents', 'milo', 'diff', 'copy', 'settings', 'theme', 'new', 'exit']
 const OPTIONS: Record<string, readonly string[]> = {
   mode: session.MODES,
   milo: ['small', 'big', 'thinking', 'working', 'error'],
   settings: SETTING_NAMES,
+  theme: THEME_NAMES,
 }
 
 const seconds = (ms: number) => {
@@ -105,38 +108,83 @@ const seconds = (ms: number) => {
 const shortPath = (path: string, max: number) =>
   path.length > max ? `…${path.slice(path.length - max + 1)}` : path
 
-/** A round-bordered box with its name set into the top edge; cyan while it has the keyboard. */
+/** How a panel's border shows what Claude is up to: a streak circling it while working, all lit while waiting on you. */
+type Glow = { kind: 'working' | 'waiting'; frame: number } | undefined
+
+type Paint = (text: string) => string
+const plain: Paint = text => text
+const GLOW_HEAD: Paint = text => c.bold(c.accent(text))
+const GLOW_BODY: Paint = c.accent
+const GLOW_TAIL: Paint = text => c.dim(c.accent(text))
+const LAP_FRAMES = 40 // frames for the streak to go once around, at 120ms a frame
+
+/** Colors each character, one escape sequence per run of the same paint. */
+const paintRun = (chars: string[], paints: Paint[]) => {
+  let out = ''
+  for (let i = 0; i < chars.length; ) {
+    let j = i
+    while (j < chars.length && paints[j] === paints[i]) j++
+    out += paints[i]!(chars.slice(i, j).join(''))
+    i = j
+  }
+  return out
+}
+
+/** A round-bordered box with its name set into the top edge; in the focus color while it has the keyboard. */
 const Panel = ({
   label,
   width,
   height,
   focused = false,
+  glow,
   children,
 }: {
   label: string
   width: number
   height: number
   focused?: boolean
+  glow?: Glow
   children: React.ReactNode
 }) => {
-  const edge = focused ? c.cyan : (text: string) => text
+  const w = Math.max(2, width)
+  const h = Math.max(3, height)
+  const base = focused ? c.focus : plain
+  // Border cells are numbered clockwise from the top-left corner.
+  const perimeter = 2 * (w - 1) + 2 * (h - 1)
+  const step = Math.max(1, Math.round(perimeter / LAP_FRAMES))
+  const length = Math.max(6, Math.round(perimeter / 10))
+  const head = glow ? (glow.frame * step) % perimeter : 0
+  const paint = (i: number): Paint => {
+    if (!glow) return base
+    if (glow.kind === 'waiting') return GLOW_HEAD
+    const behind = (head - i + perimeter) % perimeter
+    return behind >= length ? base : behind < length / 3 ? GLOW_HEAD : behind < (2 * length) / 3 ? GLOW_BODY : GLOW_TAIL
+  }
+  const range = (count: number, at: (k: number) => number) => Array.from({ length: count }, (_, k) => paint(at(k)))
+
   const name = ` ${label} `
-  const top = `${edge('╭─')}${c.bold(name)}${edge(`${'─'.repeat(Math.max(0, width - 3 - name.length))}╮`)}`
+  const fill = Math.max(0, w - 3 - name.length)
+  const topChars = ['╭', '─', ...' '.repeat(name.length), ...'─'.repeat(fill), '╮']
+  const topPaints = range(topChars.length, k => k)
+  const top = `${paintRun(topChars.slice(0, 2), topPaints.slice(0, 2))}${c.bold(name)}${paintRun(topChars.slice(2 + name.length), topPaints.slice(2 + name.length))}`
+  const bottom = paintRun(['╰', ...'─'.repeat(w - 2), '╯'], range(w, k => w - 1 + h - 1 + (w - 1 - k)))
+  const right = range(h - 2, k => w - 1 + 1 + k).map(p => p('│'))
+  const left = range(h - 2, k => perimeter - 1 - k).map(p => p('│'))
   return (
-    <Box flexDirection="column" width={width} height={height}>
+    <Box flexDirection="column" width={w} height={h}>
       <Text wrap="truncate">{top}</Text>
-      <Box
-        borderStyle="round"
-        borderTop={false}
-        borderColor={focused ? 'cyan' : undefined}
-        width={width}
-        height={Math.max(1, height - 1)}
-        flexDirection="column"
-        paddingX={1}
-        overflow="hidden"
-      >
-        {children}
+      <Box height={h - 2}>
+        <Box width={1} flexShrink={0}>
+          <Text>{left.join('\n')}</Text>
+        </Box>
+        <Box width={w - 2} flexDirection="column" paddingX={1} overflow="hidden">
+          {children}
+        </Box>
+        <Box width={1} flexShrink={0}>
+          <Text>{right.join('\n')}</Text>
+        </Box>
       </Box>
+      <Text wrap="truncate">{bottom}</Text>
     </Box>
   )
 }
@@ -199,7 +247,7 @@ const Header = ({ width, s }: { width: number; s: State }) => {
   const pct = s.contextPct === undefined ? '–' : `${s.contextPct}%`
   const agents = `${s.agents} agent${s.agents === 1 ? '' : 's'} · ${s.busy ? 'working' : 'idle'}`
   const info = [
-    c.bold(c.orange('Milo')),
+    c.bold(c.accent('Milo')),
     'your coding cat, powered by Claude Code',
     c.dim(shortPath(process.cwd(), Math.max(16, width - 50))),
     '',
@@ -249,6 +297,7 @@ const Workspace = ({
   first,
   offset,
   selection,
+  glow,
 }: {
   width: number
   height: number
@@ -256,6 +305,7 @@ const Workspace = ({
   first: number
   offset: number
   selection: Selection | undefined
+  glow: Glow
 }) => {
   const innerHeight = Math.max(1, height - 2)
   let view: string[]
@@ -269,7 +319,7 @@ const Workspace = ({
     if (offset > 0) view[view.length - 1] = c.dim(`── ${offset} more line${offset === 1 ? '' : 's'} below · PgDn ──`)
   }
   return (
-    <Panel label="Workspace" width={width} height={height}>
+    <Panel label="Workspace" width={width} height={height} glow={glow}>
       {view.map((line, i) => (
         <Text key={i} wrap="truncate">
           {line || ' '}
@@ -309,14 +359,14 @@ const Explorer = ({
   const visible = rows.slice(top, top + Math.max(1, height - 3))
   const title = `${c.bold(basename(root) || root)}${rows.length ? '' : c.dim(' (empty)')}`
   return (
-    <Box borderStyle="round" borderColor={focused ? 'cyan' : undefined} width={width} height={height} flexDirection="column" paddingX={1} overflow="hidden">
+    <Box borderStyle="round" borderColor={focused ? shade('focus') : undefined} width={width} height={height} flexDirection="column" paddingX={1} overflow="hidden">
       <Text wrap="truncate">{title}</Text>
       {visible.map((row, i) => {
         const icon = row.dir ? (open.has(row.path) ? '▾ ' : '▸ ') : '  '
         const text = `${'  '.repeat(row.depth)}${icon}${row.name}`
         const line =
           top + i !== picked
-            ? row.dir ? c.cyan(text) : text
+            ? row.dir ? c.focus(text) : text
             : focused
               ? c.inverse(text + ' '.repeat(Math.max(0, inner - stringWidth(text))))
               : c.bold(text)
@@ -339,7 +389,7 @@ const EditorView = ({ width, height, doc, dirty, focused }: { width: number; hei
   const file = relative(process.cwd(), doc.path) || doc.path
   const where = c.dim(`Ln ${doc.row + 1}, Col ${column(doc.lines[doc.row]!, doc.col) + 1}`)
   const keys = c.dim(focused ? 'Ctrl+S save · Ctrl+W close · Esc files' : 'click to edit')
-  const title = `${c.bold(shortPath(file, Math.max(10, width - 50)))}${dirty ? c.orange(' ●') : ''}  ${where}  ${keys}`
+  const title = `${c.bold(shortPath(file, Math.max(10, width - 50)))}${dirty ? c.accent(' ●') : ''}  ${where}  ${keys}`
   return (
     <Panel label="Editor" width={width} height={height} focused={focused}>
       <Text wrap="truncate">{title}</Text>
@@ -390,7 +440,7 @@ const TerminalView = ({
       c.dim('cd changes folder · clear empties this · Ctrl+C stops a command · Ctrl+B goes back to Milo'),
     ]
   else if (offset > 0) view[view.length - 1] = c.dim(`── ${offset} more line${offset === 1 ? '' : 's'} below · PgDn ──`)
-  const title = `${c.dim(shortPath(cwd, Math.max(10, width - 20)))}${running ? `  ${c.orange('running…')}` : ''}`
+  const title = `${c.dim(shortPath(cwd, Math.max(10, width - 20)))}${running ? `  ${c.accent('running…')}` : ''}`
   return (
     <Panel label="Command" width={width} height={height} focused={focused}>
       <Text wrap="truncate">{title}</Text>
@@ -405,7 +455,7 @@ const TerminalView = ({
 
 // --- Diff: old and new side by side ----------------------------------------
 
-const DiffView = ({ width, height, diff, scroll }: { width: number; height: number; diff: Diff; scroll: number }) => {
+const DiffView = ({ width, height, diff, scroll, glow }: { width: number; height: number; diff: Diff; scroll: number; glow: Glow }) => {
   const rows = useMemo(() => align(diff.before, diff.after), [diff])
   const gap = 2
   const paneWidth = Math.floor((width - gap) / 2)
@@ -425,13 +475,13 @@ const DiffView = ({ width, height, diff, scroll }: { width: number; height: numb
   }
 
   const pane = (title: string, side: 'left' | 'right') => (
-    <Panel label="Diff" width={paneWidth} height={height}>
+    <Panel label="Diff" width={paneWidth} height={height} glow={glow}>
       <Text wrap="truncate">{title}</Text>
       {visible.map((row, i) => (
         <Text key={i} wrap="truncate">
           {side === 'left'
-            ? cell(row.left, c.red, row.kind === 'del' || row.kind === 'change')
-            : cell(row.right, c.green, row.kind === 'add' || row.kind === 'change')}
+            ? cell(row.left, c.error, row.kind === 'del' || row.kind === 'change')
+            : cell(row.right, c.ok, row.kind === 'add' || row.kind === 'change')}
         </Text>
       ))}
     </Panel>
@@ -440,9 +490,9 @@ const DiffView = ({ width, height, diff, scroll }: { width: number; height: numb
   const more = rows.length > bodyHeight ? c.dim(` · ${top + 1}–${top + visible.length} of ${rows.length}`) : ''
   return (
     <Box width={width} height={height}>
-      {pane(`${c.red('old')} ${c.dim(shortPath(file, paneWidth - 12))}`, 'left')}
+      {pane(`${c.error('old')} ${c.dim(shortPath(file, paneWidth - 12))}`, 'left')}
       <Box width={gap} />
-      {pane(`${c.green('new')}${more}`, 'right')}
+      {pane(`${c.ok('new')}${more}`, 'right')}
     </Box>
   )
 }
@@ -453,14 +503,14 @@ const StatusLine = ({ width, s, frame, now, notice }: { width: number; s: State;
   const time = seconds(s.busy ? now - s.turnStarted : s.lastTurnMs)
   const tools = `${s.turnTools} tool${s.turnTools === 1 ? '' : 's'}${s.currentTool ? ` · ${s.currentTool}` : ''}`
   const message = notice
-    ? c.green(notice)
+    ? c.ok(notice)
     : s.busy
-      ? `${c.orange(FRAMES[frame % FRAMES.length]!)} ${s.status}…`
+      ? `${c.accent(FRAMES[frame % FRAMES.length]!)} ${s.status}…`
       : s.status
   return (
     <Box width={width} height={1}>
       <Text wrap="truncate">
-        {`${c.orange(FACES[s.mood])} ${message}  ${c.dim(time)}  ${c.dim(tools)}`}
+        {`${c.accent(FACES[s.mood])} ${message}  ${c.dim(time)}  ${c.dim(tools)}`}
       </Text>
     </Box>
   )
@@ -480,7 +530,7 @@ const inputLines = (s: State, input: string, cursor: number, width: number, ghos
     const keys = `${c.bold('[y]')}es  ${c.bold('[n]')}o${asking.canAlways ? `  ${c.bold('[a]')}lways` : ''}`
     const diffHint = asking.diff ? c.dim('  · Ctrl+O diff') : ''
     return [
-      ...fit(` ${c.orange('?')} Allow ${c.bold(asking.tool)}${detail}`),
+      ...fit(` ${c.accent('?')} Allow ${c.bold(asking.tool)}${detail}`),
       ...(asking.reason ? fit(c.dim(`  ${asking.reason}`)) : []),
       `  ${keys}${diffHint}`,
     ]
@@ -498,8 +548,8 @@ const inputLines = (s: State, input: string, cursor: number, width: number, ghos
     const q = asking.questions[asking.index]!
     const hint = q.multiSelect ? 'numbers separated by commas, or type your own' : 'a number, or type your own'
     return [
-      ...fit(` ${c.orange('?')} ${c.bold(q.question)}`),
-      ...q.options.flatMap((o, i) => fit(`  ${c.cyan(String(i + 1))}. ${o.label} ${c.dim(`- ${o.description}`)}`)),
+      ...fit(` ${c.accent('?')} ${c.bold(q.question)}`),
+      ...q.options.flatMap((o, i) => fit(`  ${c.focus(String(i + 1))}. ${o.label} ${c.dim(`- ${o.description}`)}`)),
       ...typed(` ${c.dim(`(${hint})`)} ${c.bold('❯')} `),
     ]
   }
@@ -508,11 +558,11 @@ const inputLines = (s: State, input: string, cursor: number, width: number, ghos
 
 const InputBox = ({ width, lines, mood }: { width: number; lines: string[]; mood: Mood }) => {
   // Milo's paws rest on the top edge, centered under the face on the status
-  // line (which starts above the corner) and in the same orange.
+  // line (which starts above the corner) and in the same accent color.
   const paws = 'U─U'
   const before = Math.max(0, Math.floor((stringWidth(FACES[mood]) - paws.length) / 2) - 1)
   const after = Math.max(0, width - 2 - before - paws.length)
-  const top = `┌${'─'.repeat(before)}${c.orange("U")}${"─"}${c.orange("U")}${'─'.repeat(after)}┐`
+  const top = `┌${'─'.repeat(before)}${c.accent("U")}${"─"}${c.accent("U")}${'─'.repeat(after)}┐`
   return (
     <Box flexDirection="column" width={width}>
       <Text>{top}</Text>
@@ -588,7 +638,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   )
   const ghost =
     s.pending || cursor !== input.length ? '' : shellMode ? (shellCompletion?.ghost ?? '') : completion(input, names, OPTIONS)
-  const prompt = shellMode ? ` ${c.cyan(basename(termCwd) || termCwd)} ${c.bold('$')} ` : ` ${c.bold('❯')} `
+  const prompt = shellMode ? ` ${c.focus(basename(termCwd) || termCwd)} ${c.bold('$')} ` : ` ${c.bold('❯')} `
   const boxWidth = Math.max(20, columns - 2)
   const lines = inputLines(s, input, cursor, boxWidth, ghost, prompt)
   const inputHeight = lines.length + 2
@@ -612,6 +662,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const editorGutter = doc ? String(doc.lines.length).length + 1 : 0
   const editorWidth = Math.max(1, innerWidth - editorGutter)
   const dirty = useMemo(() => !!doc && isDirty(doc), [doc?.lines, doc?.saved])
+  const glow: Glow = s.pending ? { kind: 'waiting', frame } : s.busy ? { kind: 'working', frame } : undefined
 
   // Claude may have changed files by the end of each turn. The open file
   // follows unless it has unsaved changes.
@@ -655,7 +706,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     edit(text.slice(0, at) + added + text.slice(at), at + added.length)
   }
 
-  const warn = (text: string) => setNotice(c.orange(text))
+  const warn = (text: string) => setNotice(c.accent(text))
   /** True the second time `action` is asked for within a few seconds, for "press again to…". */
   const confirmed = (action: string) => {
     const ok = armed.current.action === action && Date.now() - armed.current.at < NOTICE_MS
@@ -704,10 +755,10 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const runShell = (text: string) => {
     if (job) return warn('A command is still running. Ctrl+C stops it.')
     if (text === 'clear' || text === 'cls') return setTermLines([])
-    const echo = `${c.cyan(basename(termCwd) || termCwd)} ${c.bold('$')} ${text}`
+    const echo = `${c.focus(basename(termCwd) || termCwd)} ${c.bold('$')} ${text}`
     const moved = changeDir(text, termCwd)
     if (moved) {
-      setTermLines(l => [...l, echo, ...('problem' in moved ? [c.red(moved.problem)] : [])])
+      setTermLines(l => [...l, echo, ...('problem' in moved ? [c.error(moved.problem)] : [])])
       // The explorer and Claude follow the command line into the new folder.
       if ('cwd' in moved) {
         setTermCwd(moved.cwd)
@@ -725,7 +776,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       (code, signal) => {
         setJob(undefined)
         const time = seconds(Date.now() - started)
-        const outcome = code === 0 ? c.green(`✓ done in ${time}`) : signal ? c.orange(`stopped after ${time}`) : c.red(`✗ exit ${code} after ${time}`)
+        const outcome = code === 0 ? c.ok(`✓ done in ${time}`) : signal ? c.accent(`stopped after ${time}`) : c.error(`✗ exit ${code} after ${time}`)
         setTermLines(l => [...(l.at(-1) === '' ? l.slice(0, -1) : l), outcome])
         // The command may have changed files.
         setTreeVersion(v => v + 1)
@@ -828,7 +879,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       case '/settings': {
         const result = settingsCommand(text.slice(name!.length))
         note(result.text, result.ok ? 'raw' : 'error')
-        if (result.ok && args.length) note('It takes effect the next time Milo starts. /mode switches now.', 'dim')
+        if (result.ok && args.length && args[0] !== 'theme') note('It takes effect the next time Milo starts. /mode switches now.', 'dim')
+        return true
+      }
+      case '/theme': {
+        const result = themeCommand(text.slice(name!.length))
+        note(result.text, result.ok ? 'raw' : 'error')
         return true
       }
       case '/help':
@@ -1059,7 +1115,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       if (!choices.length) return
       const names = choices.map(choice => choice.trimEnd().replace(/^.*\/(?=.)/, ''))
       const shown = names.slice(0, 200).join('  ') + (names.length > 200 ? c.dim(`  …and ${names.length - 200} more`) : '')
-      setTermLines(l => [...l, `${c.cyan(basename(termCwd) || termCwd)} ${c.bold('$')} ${input}`, c.dim(shown)])
+      setTermLines(l => [...l, `${c.focus(basename(termCwd) || termCwd)} ${c.bold('$')} ${input}`, c.dim(shown)])
       setTermScroll(0)
       return
     }
@@ -1108,7 +1164,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
           />
         )}
         {diff ? (
-          <DiffView width={mainWidth} height={workspaceHeight} diff={diff} scroll={diffScroll} />
+          <DiffView width={mainWidth} height={workspaceHeight} diff={diff} scroll={diffScroll} glow={glow} />
         ) : shellMode ? (
           <Box flexDirection="column" width={mainWidth}>
             {showEditor && <EditorView width={mainWidth} height={editorBoxHeight} doc={doc} dirty={dirty} focused={focus === 'editor'} />}
@@ -1124,6 +1180,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
             first={first}
             offset={offset}
             selection={selection}
+            glow={glow}
           />
         )}
       </Box>

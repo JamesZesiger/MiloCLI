@@ -9,8 +9,9 @@ import {
   type SDKSessionInfo,
   type SlashCommand,
 } from '@anthropic-ai/claude-agent-sdk'
-import { c } from './milo.js'
+import { c, paint } from './milo.js'
 import { describeSettings, saveSetting, SETTINGS_FILE } from './settings.js'
+import { findTheme, setTheme, THEME_NAMES, THEMES, themeName } from './theme.js'
 import type { Entry } from './store.js'
 
 /**
@@ -21,7 +22,7 @@ export const settingsCommand = (args: string): { text: string; ok: boolean } => 
   const match = /^([\w-]+)\s*=?\s*(.*)$/.exec(args.trim())
   if (!match?.[1]) {
     const rows = describeSettings().map(
-      s => `  ${c.cyan(s.key)} = ${s.value ? `"${s.value}"` : c.dim('not set')}  ${c.dim(`· ${s.about}`)}`,
+      s => `  ${c.focus(s.key)} = ${s.value ? `"${s.value}"` : c.dim('not set')}  ${c.dim(`· ${s.about}`)}`,
     )
     return { ok: true, text: [c.bold('Milo settings'), ...rows, c.dim(`/settings <name> <value> saves one to ${SETTINGS_FILE}`)].join('\n') }
   }
@@ -29,6 +30,29 @@ export const settingsCommand = (args: string): { text: string; ok: boolean } => 
   if (!value) return { ok: false, text: `Give a value too, like /settings ${key} Auto` }
   const problem = saveSetting(key, value)
   return problem ? { ok: false, text: problem } : { ok: true, text: `Saved ${key} = "${value.replace(/^["']|["']$/g, '')}".` }
+}
+
+/**
+ * /theme: lists the themes with a sample of each one's colors, or switches to
+ * one and saves it for next time. Returns what to show.
+ */
+export const themeCommand = (args: string): { text: string; ok: boolean } => {
+  const wanted = args.trim()
+  if (!wanted) {
+    const width = Math.max(...THEME_NAMES.map(name => name.length))
+    const rows = THEME_NAMES.map(name => {
+      const { about, colors } = THEMES[name]
+      const sample = Object.values(colors).map(color => paint(color, '●')).join(' ')
+      const mark = name === themeName() ? c.focus('❯') : ' '
+      return ` ${mark} ${name.padEnd(width)}  ${sample}  ${c.dim(about)}`
+    })
+    return { ok: true, text: [c.bold('Themes'), ...rows, c.dim('/theme <name> switches; Milo remembers it.')].join('\n') }
+  }
+  const name = findTheme(wanted)
+  if (!name) return { ok: false, text: `Unknown theme ${wanted}. Choose from: ${THEME_NAMES.join(', ')}` }
+  setTheme(name)
+  const problem = saveSetting('theme', name)
+  return problem ? { ok: false, text: `Switched to ${name}, but ${problem}` } : { ok: true, text: `Switched to the ${name} theme.` }
 }
 
 /** Built-in commands like /context and /model reply with one unstreamed message. */
@@ -62,7 +86,7 @@ export const formatSessions = (sessions: SDKSessionInfo[]) =>
         c.bold('Recent conversations in this folder'),
         ...sessions.map(
           (s, i) =>
-            `  ${c.cyan(String(i + 1).padStart(2))}. ${clip(s.customTitle || s.summary || s.firstPrompt || '(untitled)', 60)} ${c.dim(`· ${ago(s.lastModified)}`)}`,
+            `  ${c.focus(String(i + 1).padStart(2))}. ${clip(s.customTitle || s.summary || s.firstPrompt || '(untitled)', 60)} ${c.dim(`· ${ago(s.lastModified)}`)}`,
         ),
         c.dim('/resume <number> picks one'),
       ].join('\n')
@@ -98,7 +122,7 @@ export const history = async (sessionId: string, summarize: (input: Record<strin
 export const formatCommands = (commands: SlashCommand[]) => {
   const line = (cmd: SlashCommand) => {
     const name = `/${cmd.name}${cmd.argumentHint ? ` ${cmd.argumentHint}` : ''}`
-    return `  ${c.cyan(name)} ${c.dim(clip(cmd.description, 70))}`
+    return `  ${c.focus(name)} ${c.dim(clip(cmd.description, 70))}`
   }
   const sorted = [...commands].sort((a, b) => a.name.localeCompare(b.name))
   return [
@@ -138,7 +162,7 @@ export const formatAgents =(agents: AgentInfo[]) =>
   agents.length
     ? [
         c.bold('Subagents'),
-        ...agents.map(a => `  ${c.cyan(a.name)}${a.model ? c.dim(` (${a.model})`) : ''} ${c.dim(clip(a.description, 70))}`),
+        ...agents.map(a => `  ${c.focus(a.name)}${a.model ? c.dim(` (${a.model})`) : ''} ${c.dim(clip(a.description, 70))}`),
         c.dim('Add your own in .claude/agents or ~/.claude/agents.'),
       ].join('\n')
     : 'No subagents available.'
