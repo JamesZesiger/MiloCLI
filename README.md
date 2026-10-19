@@ -223,3 +223,7 @@ src/
 build/
   bundle.mjs    bundles the app into dist/milo.js with esbuild
 ```
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
