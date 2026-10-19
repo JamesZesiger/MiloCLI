@@ -35,7 +35,7 @@ when piped, or with `--plain`, it runs line by line.
 | `npm run dev`       | Run from source with `tsx`, no build step       |
 | `npm run build`     | Typecheck and bundle to `dist/milo.js`          |
 | `npm run typecheck` | Typecheck only                                  |
-| `npm run frame`     | Print one frame of the app with sample content; pass `-- [columns] [rows]` to set the size |
+| `npm run frame`     | Print one frame of the app with sample content; pass `-- [columns] [rows] [character]` to set the size and mascot |
 
 ## Talking to Milo
 
@@ -62,7 +62,8 @@ edits, Plan and Auto.
 | `/status`        | Show the folder, session, model, mode and account              |
 | `/mode [name]`   | Show or switch the permission mode                             |
 | `/agents`        | List the subagents Claude can use                              |
-| `/milo [size]`   | Show Milo: `small` or `big`, or `thinking`, `working`, `error` |
+| `/milo [size]`   | Show the mascot: `small` or `big`, or `thinking`, `working`, `error` |
+| `/char [name]`   | List the mascots, or switch to one: `milo`, `boo` or `none`    |
 | `/diff`          | Show or hide the last file change                              |
 | `/copy [n]`      | Copy the last reply, or the nth from last, to the clipboard    |
 | `/settings`      | Show Milo's settings, or save one                              |
@@ -113,6 +114,7 @@ line. Claude Code's settings stay in `~/.claude`.
 | -------------- | ------------------------------------------------------------ |
 | `default_mode` | The permission mode Milo starts in: Default, Accept edits, Plan or Auto |
 | `theme`        | Milo's colors: milo, tabby, ocean, forest, violet or light   |
+| `character`    | The mascot and its personality: milo, boo or none            |
 
 Set one from inside Milo with `/settings default_mode Auto`.
 
@@ -123,6 +125,22 @@ switches to one at once and saves it for next time. The `milo` theme uses your
 terminal's own colors; the others use fixed shades, and `light` suits
 light-background terminals. Themes live in `src/theme.ts`, each giving a shade
 to the four colors Milo uses: accent, focus, ok and error.
+
+### Characters
+
+The mascot in the header, and the personality Claude speaks with, is a
+character. `/char` lists them and `/char boo` switches at once and saves it for
+next time.
+
+| Character | Who                                                              |
+| --------- | ---------------------------------------------------------------- |
+| `milo`    | The default: an orange and white cat, warm and brief             |
+| `boo`     | A tortoiseshell with tortitude: dry, confident, a little sassy   |
+| `none`    | No mascot and no added personality: Claude's own voice           |
+
+A new personality means restarting Claude Code, which Milo does on the same
+conversation, waiting for any reply in progress to finish. Characters live in
+`src/characters.ts`, and each cat's coat in `src/portrait.ts`.
 
 ## Project layout
 
@@ -139,8 +157,9 @@ src/
   images.ts     images in prompts and from the clipboard
   settings.ts   ~/.milo/settings.toml
   theme.ts      the color themes
-  milo.ts       Milo's persona, faces and colors
-  portrait.ts   Milo's portrait
+  milo.ts       colors and moods
+  characters.ts the mascots: names, faces, words and personalities
+  portrait.ts   the mascot's portrait
 build/
   bundle.mjs    bundles the app into dist/milo.js with esbuild
 ```

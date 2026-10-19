@@ -2,6 +2,7 @@
 // show any slice of them when scrolled.
 import wrapAnsi from 'wrap-ansi'
 import { basename } from 'node:path'
+import { mascot } from './characters.js'
 import { c } from './milo.js'
 import type { Entry } from './store.js'
 
@@ -29,7 +30,7 @@ const linesFor = (entry: Entry, width: number, labelled: boolean): string[] => {
         ...(entry.images ?? []).flatMap(image => wrap(c.dim(`  🖼  ${basename(image)}`), width)),
       ]
     case 'assistant':
-      return [...(labelled ? ['', c.bold(c.accent('Milo'))] : []), ...wrap(markdown(entry.text.trim()), width)]
+      return [...(labelled ? ['', c.bold(c.accent(mascot().name))] : []), ...wrap(markdown(entry.text.trim()), width)]
     case 'tool': {
       const head = wrap(`  ${ICONS[entry.status]} ${c.bold(entry.name)}  ${c.dim(entry.detail)}`, width)
       if (!entry.error) return head
@@ -48,7 +49,7 @@ export const logLines = (entries: Entry[], width: number): string[] => {
   const out: string[] = []
   let replied = false
   entries.forEach(entry => {
-    // Label Milo's reply once per prompt, not again after each tool call.
+    // Label the mascot's reply once per prompt, not again after each tool call.
     if (entry.kind === 'user') replied = false
     const labelled = entry.kind === 'assistant' && !replied
     if (entry.kind === 'assistant') replied = true

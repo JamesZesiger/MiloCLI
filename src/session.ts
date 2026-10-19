@@ -11,7 +11,8 @@ import {
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { commandNames, history, syntheticText } from './commands.js'
 import { withImages, type Content } from './images.js'
-import { PERSONA, PAST, VERBS, pick } from './milo.js'
+import { mascot, persona } from './characters.js'
+import { pick } from './milo.js'
 import { MODES } from './settings.js'
 import { getState, push, setState, type Choice, type Diff, type Entry, type Question } from './store.js'
 
@@ -238,7 +239,7 @@ const handle = (msg: SDKMessage) => {
           mood: 'working',
           currentTool: block.name,
           turnTools: s.turnTools + 1,
-          status: pick(VERBS),
+          status: pick(mascot().verbs),
           lastDiff: diff ?? s.lastDiff,
         }))
       }
@@ -262,12 +263,12 @@ const handle = (msg: SDKMessage) => {
       clearStop()
       const ms = Date.now() - getState().turnStarted
       const ok = msg.subtype === 'success'
-      const outcome = ok ? `Milo ${pick(PAST)}` : `Stopped (${msg.subtype.replaceAll('_', ' ')})`
+      const outcome = ok ? `${mascot().name} ${pick(mascot().past)}` : `Stopped (${msg.subtype.replaceAll('_', ' ')})`
       const cost = billedPerToken && msg.total_cost_usd ? ` · $${msg.total_cost_usd.toFixed(2)}` : ''
       push({ kind: 'note', text: `${outcome} · ${Math.max(1, Math.round(ms / 1000))}s${cost}`, tone: ok ? 'dim' : 'error' })
       setState({ busy: false, mood: ok ? 'idle' : 'error', status: outcome, lastTurnMs: ms, currentTool: undefined })
       refreshContext()
-      if (movedTo) follow()
+      if (movedTo || restyled) follow()
       const next = queued.shift()
       if (next !== undefined) submit(next)
       return
@@ -284,7 +285,7 @@ export const start = (resume?: string, permissionMode?: PermissionMode) => {
       resume,
       permissionMode,
       includePartialMessages: true,
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: PERSONA },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: persona() },
       settingSources: ['user', 'project', 'local'],
       canUseTool,
     },
@@ -327,7 +328,7 @@ export const submit = (text: string) => {
   const prompt = withImages(text)
   push({ kind: 'user', text, images: prompt.images })
   for (const problem of prompt.problems) push({ kind: 'note', text: problem, tone: 'error' })
-  setState({ busy: true, mood: 'thinking', status: pick(VERBS), turnStarted: Date.now(), turnTools: 0 })
+  setState({ busy: true, mood: 'thinking', status: pick(mascot().verbs), turnStarted: Date.now(), turnTools: 0 })
   inbox?.send(prompt.content)
 }
 
@@ -400,35 +401,47 @@ export const restart = async (resume?: string) => {
   start(resume, MODES.includes(mode) ? mode : undefined)
 }
 
-// --- Following the command line's folder ---------------------------------
+// --- Following the command line's folder, and a new personality ----------
 
-// Claude Code's working folder is fixed when it starts, so a new folder means
-// restarting it there on the same conversation. Mid-turn, that waits for the turn to end.
+// Claude Code's working folder and system prompt are fixed when it starts, so
+// a new folder or mascot means restarting it on the same conversation.
+// Mid-turn, that waits for the turn to end.
 let movedTo: string | undefined
+let restyled = false
 
 const follow = () => {
   const dir = movedTo
   movedTo = undefined
-  if (!dir || dir === process.cwd()) return
-  try {
-    process.chdir(dir)
-  } catch (err) {
-    push({ kind: 'note', text: `Couldn't move to ${dir}: ${err instanceof Error ? err.message : String(err)}`, tone: 'error' })
-    return
-  }
+  const moving = !!dir && dir !== process.cwd()
+  if (!moving && !restyled) return
+  if (moving)
+    try {
+      process.chdir(dir)
+    } catch (err) {
+      push({ kind: 'note', text: `Couldn't move to ${dir}: ${err instanceof Error ? err.message : String(err)}`, tone: 'error' })
+      return
+    }
+  restyled = false
   const { sessionId, mode } = getState()
   close()
   agentCalls.clear()
   tasks.clear()
   setState({ agents: 0 })
   start(sessionId, MODES.includes(mode as PermissionMode) ? (mode as PermissionMode) : undefined)
-  push({ kind: 'note', text: `Now working in ${dir}`, tone: 'dim' })
+  if (moving) push({ kind: 'note', text: `Now working in ${dir}`, tone: 'dim' })
 }
 
 /** Moves Claude Code to `dir`, once any reply in progress has finished. */
 export const moveTo = (dir: string) => {
   movedTo = dir
   if (getState().busy) push({ kind: 'note', text: `Moving to ${dir} once this reply ends`, tone: 'dim' })
+  else follow()
+}
+
+/** Restarts Claude Code with the current mascot's personality, once any reply in progress has finished. */
+export const restyle = () => {
+  restyled = true
+  if (getState().busy) push({ kind: 'note', text: 'The new personality starts once this reply ends.', tone: 'dim' })
   else follow()
 }
 

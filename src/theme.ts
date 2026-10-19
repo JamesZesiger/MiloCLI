@@ -40,10 +40,20 @@ export const truecolor = /truecolor|24bit/i.test(process.env.COLORTERM ?? '') ||
 
 export type RGB = [number, number, number]
 
-/** The nearest color in the 256-color cube, for terminals without truecolor. */
-export const to256 = ([r, g, b]: RGB) => {
+/**
+ * The nearest of the 256 colors, for terminals without truecolor: the 6×6×6
+ * cube or the gray ramp, whichever is closer. The cube alone turns dark,
+ * muted colors into olive and teal.
+ */
+export const to256 = (rgb: RGB) => {
+  const LEVELS = [0, 95, 135, 175, 215, 255]
   const level = (v: number) => (v < 48 ? 0 : v < 115 ? 1 : Math.floor((v - 35) / 40))
-  return 16 + 36 * level(r) + 6 * level(g) + level(b)
+  const [r, g, b] = rgb.map(level) as RGB
+  const cube: RGB = [LEVELS[r]!, LEVELS[g]!, LEVELS[b]!]
+  const step = Math.max(0, Math.min(23, Math.round(((rgb[0] + rgb[1] + rgb[2]) / 3 - 8) / 10)))
+  const gray = 8 + 10 * step
+  const distance = (to: RGB) => to.reduce((sum, v, i) => sum + (v - rgb[i]!) ** 2, 0)
+  return distance([gray, gray, gray]) < distance(cube) ? 232 + step : 16 + 36 * r + 6 * g + b
 }
 
 const BASIC: Record<string, number> = { red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36 }
