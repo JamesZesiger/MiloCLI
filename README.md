@@ -194,5 +194,3 @@ src/
 build/
   bundle.mjs    bundles the app into dist/milo.js with esbuild
 ```
-
-Built by CU*Answers.
