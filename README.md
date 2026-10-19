@@ -5,6 +5,35 @@ background through the Claude Agent SDK, and Milo gives it a full-screen home:
 a chat workspace, a file explorer, a code editor and a command line, with a cat
 who reacts as Claude thinks and works.
 
+![Milo working on a bug](docs/screenshots/chat.png)
+
+## A quick tour
+
+**Approve changes side by side.** When Claude wants to edit a file, Milo shows
+the old and new versions next to each other and waits for a yes, no or always.
+
+![A permission prompt with a side-by-side diff](docs/screenshots/permission.png)
+
+**Answer Claude's questions.** When Claude needs a decision, the input box
+turns into a short menu: pick a number or type your own answer.
+
+![Claude asking which export format to use](docs/screenshots/question.png)
+
+**Browse, edit and run.** Ctrl+B opens a file explorer, an editor and a command
+line beside the conversation.
+
+![The file explorer with a file open in the editor](docs/screenshots/explorer.png)
+
+**Hand work to Codex.** Claude can brief a Codex agent on your ChatGPT plan,
+then check what it did before reporting back.
+
+![Claude checking a Codex agent's work](docs/screenshots/codex.png)
+
+**Pick a mascot and a theme.** Boo brings a drier personality, and six color
+themes suit dark and light terminals.
+
+![Boo in the ocean theme](docs/screenshots/boo.png)
+
 ## Requirements
 
 - Node.js 20 or later
