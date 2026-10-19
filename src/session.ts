@@ -1,115 +1,30 @@
-// The background Claude Code session for the full-screen app: sends prompts,
-// turns the SDK's messages into log entries and state, and routes permission
-// requests and questions to the screen. With an OpenAI model picked, prompts
-// go to Codex instead (see codex.ts).
-import {
-  query,
-  type CanUseTool,
-  type PermissionMode,
-  type SDKMessage,
-  type SDKUserMessage,
-} from '@anthropic-ai/claude-agent-sdk'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+// Milo's harness for the full-screen app: runs the conversation with whichever
+// provider is active (Claude Code, or OpenAI's models through Codex), turns
+// what it reports into log entries and state, asks the user before actions,
+// and decides what happens between turns: queued prompts, handing the
+// conversation across a switch, stopping, and following a new folder or
+// personality.
+import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk'
 import * as codex from './codex.js'
-import * as delegate from './delegate.js'
-import { commandNames, history, syntheticText } from './commands.js'
-import { withImages, type Content } from './images.js'
-import { mascot, persona } from './characters.js'
+import { history } from './commands.js'
+import { withImages } from './images.js'
+import { mascot } from './characters.js'
 import { pick } from './milo.js'
 import { MODES } from './settings.js'
-import { getState, push, setState, type Choice, type Diff, type Entry, type Question } from './store.js'
+import { getState, push, setState, type Entry } from './store.js'
+import { clip, summarize, type Host, type Provider, type ProviderEvent, type StartOptions } from './provider.js'
+import { startClaude, type ClaudeProvider } from './providers/claude.js'
+import { startCodex } from './providers/codex.js'
 
-const DECLINED = 'The user declined this action.'
+let active: Provider | undefined
+const queued: string[] = []
+// The OpenAI model Codex starts with; undefined is Codex's own default.
+let codexModel: string | undefined
 
-// --- Input queue: one long-lived session, fed a message per prompt ---------
+/** The running Claude Code session, for commands that ask it directly. */
+export const current = () => (active?.id === 'claude' ? (active as ClaudeProvider).query : undefined)
 
-// Each session gets its own inbox, so a closed session's generator can't
-// wake up later and swallow prompts meant for the next one.
-const createInbox = () => {
-  const pending: SDKUserMessage[] = []
-  let wake: (() => void) | undefined
-  let closed = false
-  async function* messages(): AsyncGenerator<SDKUserMessage> {
-    while (true) {
-      while (pending.length) yield pending.shift()!
-      if (closed) return
-      await new Promise<void>(resolve => (wake = resolve))
-    }
-  }
-  return {
-    messages: messages(),
-    send: (content: Content) => {
-      pending.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null })
-      wake?.()
-    },
-    close: () => {
-      closed = true
-      pending.length = 0
-      wake?.()
-    },
-  }
-}
-
-let inbox: ReturnType<typeof createInbox> | undefined
-
-// --- Helpers ---------------------------------------------------------------
-
-const clip = (text: string, max = 90) => {
-  const flat = text.replace(/\s+/g, ' ').trim()
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
-}
-
-export const summarize = (input: Record<string, unknown>): string => {
-  const key = ['command', 'file_path', 'path', 'pattern', 'url', 'query', 'description', 'prompt'].find(
-    k => typeof input[k] === 'string',
-  )
-  return key ? clip(String(input[key])) : ''
-}
-
-const readIfSmall = (file: string) => {
-  try {
-    return existsSync(file) && statSync(file).size < 512 * 1024 ? readFileSync(file, 'utf8') : ''
-  } catch {
-    return ''
-  }
-}
-
-const CONTEXT_LINES = 3
-
-/** An edit shown where it sits in the file, with a few lines either side. */
-const editInContext = (file: string, oldText: string, newText: string): Diff => {
-  const content = readIfSmall(file)
-  const at = oldText ? content.indexOf(oldText) : -1
-  if (at < 0) return { file, before: oldText, after: newText, start: 1 }
-  const lines = content.split('\n')
-  const first = content.slice(0, at).split('\n').length - 1
-  const last = first + oldText.split('\n').length - 1
-  const from = Math.max(0, first - CONTEXT_LINES)
-  const before = lines.slice(from, Math.min(lines.length, last + CONTEXT_LINES + 1)).join('\n')
-  const offset = at - lines.slice(0, from).reduce((n, line) => n + line.length + 1, 0)
-  const after = before.slice(0, offset) + newText + before.slice(offset + oldText.length)
-  return { file, before, after, start: from + 1 }
-}
-
-/** The before and after text of a file edit, for the side-by-side view. */
-const diffFor = (tool: string, input: Record<string, unknown>): Diff | undefined => {
-  const file = typeof input.file_path === 'string' ? input.file_path : undefined
-  if (!file) return undefined
-  if (tool === 'Edit' && typeof input.old_string === 'string' && typeof input.new_string === 'string')
-    return editInContext(file, input.old_string, input.new_string)
-  if (tool === 'MultiEdit' && Array.isArray(input.edits)) {
-    const edits = input.edits as { old_string: string; new_string: string }[]
-    return {
-      file,
-      before: edits.map(e => e.old_string).join('\n⋯\n'),
-      after: edits.map(e => e.new_string).join('\n⋯\n'),
-      start: 1,
-    }
-  }
-  if (tool === 'Write' && typeof input.content === 'string')
-    return { file, before: readIfSmall(file), after: input.content, start: 1 }
-  return undefined
-}
+// --- What providers report, on screen --------------------------------------
 
 const appendText = (text: string) =>
   setState(s => {
@@ -119,168 +34,131 @@ const appendText = (text: string) =>
     return { entries: [...s.entries, { kind: 'assistant', text }] }
   })
 
-const updateTool = (id: string, patch: Partial<Extract<Entry, { kind: 'tool' }>>) =>
-  setState(s => ({ entries: s.entries.map(e => (e.kind === 'tool' && e.id === id ? { ...e, ...patch } : e)) }))
+/** Adds a tool call to the log, or updates one already there. */
+const showTool = (event: Extract<ProviderEvent, { type: 'tool' }>) =>
+  setState(s => {
+    const { id, status, name, detail, error, diff } = event
+    const lastDiff = diff ?? s.lastDiff
+    const settled = status !== 'running' ? { mood: 'thinking' as const, currentTool: undefined } : {}
+    if (s.entries.some(e => e.kind === 'tool' && e.id === id)) {
+      const entries = s.entries.map(e =>
+        e.kind === 'tool' && e.id === id
+          ? { ...e, status, error, ...(name !== undefined && { name }), ...(detail !== undefined && { detail }) }
+          : e,
+      )
+      return { entries, lastDiff, ...settled }
+    }
+    if (name === undefined) return {}
+    const entry: Entry = { kind: 'tool', id, name, detail: detail ?? '', status, error }
+    return {
+      entries: [...s.entries, entry],
+      mood: 'working',
+      currentTool: name,
+      turnTools: s.turnTools + 1,
+      status: pick(mascot().verbs),
+      lastDiff,
+      ...settled,
+    }
+  })
 
-const toolName = (name: string) => (name === delegate.TOOL ? 'Codex agent' : name)
+const onEvent = (label: string, event: ProviderEvent) => {
+  switch (event.type) {
+    case 'session':
+      return setState({ sessionId: event.id })
+    case 'header': {
+      const { type: _, ...header } = event
+      return setState(Object.fromEntries(Object.entries(header).filter(([, v]) => v !== undefined)))
+    }
+    case 'commands':
+      return setState({ commands: event.names })
+    case 'text':
+      return appendText(event.text)
+    case 'reply':
+      return push({ kind: 'assistant', text: event.text })
+    case 'tool':
+      return showTool(event)
+    case 'agents':
+      return setState({ agents: event.count })
+    case 'note':
+      return push({ kind: 'note', text: event.text, tone: event.tone })
+    case 'end':
+      return endTurn(event.failure, event.cost)
+    case 'crash':
+      push({ kind: 'note', text: `${label} stopped: ${event.message}`, tone: 'error' })
+      return setState({ busy: false, mood: 'error', status: `${label} stopped` })
+  }
+}
 
-// Subagents: Agent tool calls in flight plus background tasks.
-const agentCalls = new Set<string>()
-const tasks = new Set<string>()
-const countAgents = () => setState({ agents: agentCalls.size + tasks.size })
+// --- Asking the user: one place for every provider ------------------------
 
-// --- Permissions and questions: Claude asks, the screen answers ------------
+// Each start gets a token, so a closed provider's late events are ignored,
+// while one still starting can already report.
+let started: object | undefined
 
-const canUseTool: CanUseTool = (tool, input, { signal, suggestions, decisionReason }) =>
-  new Promise(resolve => {
-    signal.addEventListener('abort', () => {
-      setState({ pending: undefined, showDiff: false })
-      resolve({ behavior: 'deny', message: DECLINED })
-    })
-
-    if (tool === 'AskUserQuestion') {
+const hostFor = (token: object, label: string): Host => ({
+  emit: event => {
+    if (token === started) onEvent(label, event)
+  },
+  approve: (request, signal) =>
+    new Promise(resolve => {
+      signal.addEventListener('abort', () => {
+        setState({ pending: undefined, showDiff: false })
+        resolve('no')
+      })
+      setState(s => ({
+        showDiff: !!request.diff,
+        lastDiff: request.diff ?? s.lastDiff,
+        pending: {
+          kind: 'permission',
+          ...request,
+          resolve: choice => {
+            setState({ pending: undefined, showDiff: false })
+            if (choice === 'no') push({ kind: 'note', text: `Declined ${request.tool}`, tone: 'dim' })
+            resolve(choice)
+          },
+        },
+      }))
+    }),
+  ask: (questions, signal) =>
+    new Promise(resolve => {
+      signal.addEventListener('abort', () => {
+        setState({ pending: undefined })
+        resolve(undefined)
+      })
       setState({
         pending: {
           kind: 'question',
-          questions: (input.questions ?? []) as Question[],
+          questions,
           index: 0,
           answers: {},
           resolve: answers => {
             setState({ pending: undefined })
-            resolve({ behavior: 'allow', updatedInput: { ...input, answers } })
+            resolve(answers)
           },
         },
       })
-      return
-    }
+    }),
+})
 
-    const diff = diffFor(tool, input)
-    const canAlways = !!suggestions?.length
-    setState(s => ({
-      showDiff: !!diff,
-      lastDiff: diff ?? s.lastDiff,
-      pending: {
-        kind: 'permission',
-        tool: toolName(tool),
-        detail: summarize(input),
-        reason: decisionReason,
-        diff,
-        canAlways,
-        resolve: (choice: Choice) => {
-          setState({ pending: undefined, showDiff: false })
-          if (choice === 'no') {
-            push({ kind: 'note', text: `Declined ${toolName(tool)}`, tone: 'dim' })
-            resolve({ behavior: 'deny', message: DECLINED })
-          } else if (choice === 'always' && canAlways)
-            resolve({ behavior: 'allow', updatedInput: input, updatedPermissions: suggestions })
-          else resolve({ behavior: 'allow', updatedInput: input })
-        },
-      },
-    }))
-  })
+// --- The loop: start, send, end each turn ---------------------------------
 
-// --- One background session ------------------------------------------------
-
-let session: ReturnType<typeof query> | undefined
-const queued: string[] = []
-// Plans with a usage limit (Pro, Max, Team, Enterprise) don't charge per token,
-// so the SDK's dollar estimate only means something without a subscription.
-let billedPerToken = false
-
-/** The running session, for commands that ask it directly. */
-export const current = () => session
-
-// Also picks up a model changed with /model.
-const refreshContext = () =>
-  session
-    ?.getContextUsage()
-    .then(usage => setState({ contextPct: Math.round(usage.percentage), model: modelName(usage.model) }))
-    .catch(() => {})
-
-const refreshUsage = () =>
-  session
-    ?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true })
-    .then(usage => {
-      const used = usage.rate_limits?.five_hour?.utilization
-      if (used != null) setState({ usage: `${Math.round(used)}%` })
-      else if (!usage.subscription_type) setState({ usage: `$${usage.session.total_cost_usd.toFixed(2)}` })
-    })
-    .catch(() => {})
-
-/** claude-opus-5-5 → Opus 5.5; anything else as given. */
-const modelName = (id: string) => {
-  const match = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:\b|$)/.exec(id)
-  if (!match) return id
-  const [, family, major, minor] = match
-  return `${family![0]!.toUpperCase()}${family!.slice(1)} ${major}${minor ? `.${minor}` : ''}`
+export const start = (resume?: string, mode?: PermissionMode) => {
+  const token = {}
+  started = token
+  const options: StartOptions = { resume, mode, model: codexModel }
+  // Codex has no mode of its own to report, so it takes the one on screen.
+  active =
+    getState().provider === 'codex'
+      ? startCodex(hostFor(token, 'Codex'), { ...options, mode: mode ?? (getState().mode as PermissionMode) })
+      : startClaude(hostFor(token, 'Claude Code'), options)
 }
 
-const handle = (msg: SDKMessage) => {
-  switch (msg.type) {
-    case 'system':
-      if (msg.subtype === 'init') {
-        setState({ sessionId: msg.session_id, mode: msg.permissionMode, model: modelName(msg.model) })
-        refreshContext()
-        refreshUsage()
-      } else if (msg.subtype === 'task_started') {
-        tasks.add(msg.task_id)
-        countAgents()
-      } else if (msg.subtype === 'task_notification') {
-        tasks.delete(msg.task_id)
-        countAgents()
-      }
-      return
-
-    case 'stream_event': {
-      if (msg.parent_tool_use_id) return
-      const event = msg.event
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') appendText(event.delta.text)
-      return
-    }
-
-    case 'assistant': {
-      if (msg.parent_tool_use_id) return
-      const reply = syntheticText(msg)
-      if (reply) push({ kind: 'assistant', text: reply })
-      for (const block of msg.message.content) {
-        if (block.type !== 'tool_use') continue
-        const input = block.input as Record<string, unknown>
-        push({ kind: 'tool', id: block.id, name: toolName(block.name), detail: summarize(input), status: 'running' })
-        if (block.name === 'Agent' || block.name === 'Task' || block.name === delegate.TOOL) {
-          agentCalls.add(block.id)
-          countAgents()
-        }
-        const diff = diffFor(block.name, input)
-        setState(s => ({
-          mood: 'working',
-          currentTool: toolName(block.name),
-          turnTools: s.turnTools + 1,
-          status: pick(mascot().verbs),
-          lastDiff: diff ?? s.lastDiff,
-        }))
-      }
-      return
-    }
-
-    case 'user': {
-      if (msg.parent_tool_use_id || !Array.isArray(msg.message.content)) return
-      for (const block of msg.message.content) {
-        if (block.type !== 'tool_result') continue
-        const text = typeof block.content === 'string' ? block.content : ''
-        if (block.is_error && text !== DECLINED) updateTool(block.tool_use_id, { status: 'error', error: text })
-        else updateTool(block.tool_use_id, { status: block.is_error ? 'error' : 'done' })
-        if (agentCalls.delete(block.tool_use_id)) countAgents()
-        setState({ mood: 'thinking', currentTool: undefined })
-      }
-      return
-    }
-
-    case 'result': {
-      const cost = billedPerToken && msg.total_cost_usd ? ` · $${msg.total_cost_usd.toFixed(2)}` : ''
-      endTurn(msg.subtype === 'success' ? undefined : msg.subtype.replaceAll('_', ' '), cost)
-      return
-    }
-  }
+export const close = () => {
+  clearStop()
+  const closing = active
+  active = undefined
+  started = undefined
+  closing?.close()
 }
 
 /** A turn is over: says how it went, then moves, restyles or sends the next prompt. */
@@ -290,106 +168,13 @@ const endTurn = (failure?: string, cost = '') => {
   const outcome = failure === undefined ? `${mascot().name} ${pick(mascot().past)}` : `Stopped (${failure})`
   push({ kind: 'note', text: `${outcome} · ${Math.max(1, Math.round(ms / 1000))}s${cost}`, tone: failure === undefined ? 'dim' : 'error' })
   setState({ busy: false, mood: failure === undefined ? 'idle' : 'error', status: outcome, lastTurnMs: ms, currentTool: undefined })
-  if (getState().provider === 'codex') refreshCodex()
-  else {
-    refreshContext()
-    refreshUsage()
-  }
+  active?.refresh()
   if (movedTo || restyled) follow()
   const next = queued.shift()
   if (next !== undefined) submit(next)
 }
 
-// --- Codex: OpenAI models, one turn per prompt ----------------------------
-
-let codexTurn: AbortController | undefined
-// undefined is Codex's own default model.
-let codexModel: string | undefined
-
-const refreshCodex = () => {
-  const id = getState().sessionId
-  const found = id ? codex.status(id) : {}
-  setState(s => ({
-    model: found.model ?? s.model,
-    contextPct: found.contextPct ?? s.contextPct,
-    usage: found.usage ?? s.usage,
-  }))
-}
-
-const startCodex = (resume?: string) => {
-  setState({ sessionId: resume, model: codexModel ? codex.modelName(codexModel) : 'Codex', commands: [] })
-  if (resume) refreshCodex()
-}
-
-const sendCodex = (text: string, images: string[]) => {
-  const turn = new AbortController()
-  codexTurn = turn
-  void codex
-    .run({
-      threadId: getState().sessionId,
-      model: codexModel,
-      mode: getState().mode,
-      text,
-      images,
-      signal: turn.signal,
-      onThread: id => turn === codexTurn && setState({ sessionId: id }),
-    })
-    .then(end => {
-      if (turn !== codexTurn) return
-      codexTurn = undefined
-      if (!end.ok && end.error) push({ kind: 'note', text: `Codex: ${end.error}`, tone: 'error' })
-      endTurn(end.ok ? undefined : end.stopped ? 'interrupted' : 'error')
-    })
-}
-
-export const start = (resume?: string, permissionMode?: PermissionMode) => {
-  if (getState().provider === 'codex') return startCodex(resume)
-  inbox = createInbox()
-  const current = query({
-    prompt: inbox.messages,
-    options: {
-      cwd: process.cwd(),
-      resume,
-      permissionMode,
-      includePartialMessages: true,
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: persona() },
-      settingSources: ['user', 'project', 'local'],
-      mcpServers: { codex: delegate.server() },
-      canUseTool,
-    },
-  })
-  session = current
-  current
-    .supportedCommands()
-    .then(commands => setState({ commands: commandNames(commands) }))
-    .catch(() => {})
-  current
-    .accountInfo()
-    .then(account => (billedPerToken = !account.subscriptionType))
-    .catch(() => {})
-  void (async () => {
-    try {
-      for await (const msg of current) if (current === session) handle(msg)
-    } catch (err) {
-      if (current !== session) return
-      push({ kind: 'note', text: `Claude Code stopped: ${err instanceof Error ? err.message : String(err)}`, tone: 'error' })
-      setState({ busy: false, mood: 'error', status: 'Claude Code stopped' })
-    }
-  })()
-}
-
-export const close = () => {
-  clearStop()
-  codexTurn?.abort()
-  codexTurn = undefined
-  delegate.stopAll()
-  inbox?.close()
-  inbox = undefined
-  session?.close()
-  session = undefined
-}
-
-/** Sends a prompt; one sent while Claude is busy waits for the turn to end. */
+/** Sends a prompt; one sent while the provider is busy waits for the turn to end. */
 export const submit = (text: string) => {
   if (getState().busy) {
     queued.push(text)
@@ -401,21 +186,24 @@ export const submit = (text: string) => {
   for (const problem of prompt.problems) push({ kind: 'note', text: problem, tone: 'error' })
   setState({ busy: true, mood: 'thinking', status: pick(mascot().verbs), turnStarted: Date.now(), turnTools: 0 })
   // The first prompt after a switch carries the conversation so far.
-  const before = handoff
+  const before = handoff ?? ''
   handoff = undefined
-  if (getState().provider === 'codex') sendCodex(before ? before + text : text, prompt.images)
-  else if (!before) inbox?.send(prompt.content)
-  else
-    inbox?.send(
-      typeof prompt.content === 'string' ? before + prompt.content : [{ type: 'text', text: before }, ...prompt.content],
-    )
+  active?.send({
+    text: before + text,
+    content: !before
+      ? prompt.content
+      : typeof prompt.content === 'string'
+        ? before + prompt.content
+        : [{ type: 'text', text: before }, ...prompt.content],
+    images: prompt.images,
+  })
 }
 
 // --- Handing the conversation across a switch ------------------------------
 
-// Claude Code and Codex can't read each other's conversations, so a switch
-// sends the new one what's on screen: prompts, replies and tool calls, newest
-// first to stay when it's long.
+// Providers can't read each other's conversations, so a switch sends the new
+// one what's on screen: prompts, replies and tool calls, newest first to stay
+// when it's long.
 const HANDOFF_CHARS = 8000
 let handoff: string | undefined
 
@@ -454,7 +242,7 @@ const handoffFrom = (entries: Entry[], from: string) => {
 
 // --- Stopping a reply ------------------------------------------------------
 
-// How long Claude Code gets to end the turn after an interrupt before Milo
+// How long the provider gets to end the turn after an interrupt before Milo
 // stops waiting and restarts it.
 const STOP_GRACE_MS = 3000
 let stopTimer: NodeJS.Timeout | undefined
@@ -464,16 +252,15 @@ const clearStop = () => {
   stopTimer = undefined
 }
 
-/** Abandons a turn that won't end: restarts Claude Code on the same conversation. */
+/** Abandons a turn that won't end: restarts the provider on the same conversation. */
 const forceStop = () => {
   clearStop()
   if (!getState().busy) return
   const id = getState().sessionId
+  const label = active?.label ?? 'Claude Code'
   close()
   queued.length = 0
-  agentCalls.clear()
-  tasks.clear()
-  push({ kind: 'note', text: "Claude Code didn't stop, so Milo restarted it.", tone: 'error' })
+  push({ kind: 'note', text: `${label} didn't stop, so Milo restarted it.`, tone: 'error' })
   setState({
     busy: false,
     mood: 'idle',
@@ -486,7 +273,7 @@ const forceStop = () => {
   start(id)
 }
 
-/** Asks Claude Code to stop; asking again, or no answer in time, forces it. */
+/** Asks the provider to stop; asking again, or no answer in time, forces it. */
 export const interrupt = () => {
   if (stopTimer) return forceStop()
   queued.length = 0
@@ -494,8 +281,7 @@ export const interrupt = () => {
   if (asking?.kind === 'permission') asking.resolve('no')
   setState({ status: 'Stopping' })
   stopTimer = setTimeout(forceStop, STOP_GRACE_MS)
-  if (codexTurn) codexTurn.abort()
-  else session?.interrupt().catch(forceStop)
+  active?.interrupt().catch(forceStop)
 }
 
 /**
@@ -510,8 +296,6 @@ export const restart = async (resume?: string) => {
   const mode = getState().mode as PermissionMode
   close()
   queued.length = 0
-  agentCalls.clear()
-  tasks.clear()
   setState({
     entries: resume ? [...entries, { kind: 'note', text: 'Resumed this conversation.', tone: 'dim' }] : [],
     busy: false,
@@ -530,7 +314,7 @@ export const restart = async (resume?: string) => {
 
 // --- Following the command line's folder, and a new personality ----------
 
-// Claude Code's working folder and system prompt are fixed when it starts, so
+// A provider's working folder and instructions are fixed when it starts, so
 // a new folder or mascot means restarting it on the same conversation.
 // Mid-turn, that waits for the turn to end.
 let movedTo: string | undefined
@@ -551,21 +335,19 @@ const follow = () => {
   restyled = false
   const { sessionId, mode } = getState()
   close()
-  agentCalls.clear()
-  tasks.clear()
   setState({ agents: 0 })
   start(sessionId, MODES.includes(mode as PermissionMode) ? (mode as PermissionMode) : undefined)
   if (moving) push({ kind: 'note', text: `Now working in ${dir}`, tone: 'dim' })
 }
 
-/** Moves Claude Code to `dir`, once any reply in progress has finished. */
+/** Moves the provider to `dir`, once any reply in progress has finished. */
 export const moveTo = (dir: string) => {
   movedTo = dir
   if (getState().busy) push({ kind: 'note', text: `Moving to ${dir} once this reply ends`, tone: 'dim' })
   else follow()
 }
 
-/** Restarts Claude Code with the current mascot's personality, once any reply in progress has finished. */
+/** Restarts the provider with the current mascot's personality, once any reply in progress has finished. */
 export const restyle = () => {
   restyled = true
   if (getState().busy) push({ kind: 'note', text: 'The new personality starts once this reply ends.', tone: 'dim' })
@@ -575,8 +357,7 @@ export const restyle = () => {
 export { MODES }
 
 export const setMode = async (mode: PermissionMode) => {
-  // Codex picks its sandbox from the mode at the start of each turn.
-  if (getState().provider === 'claude') await session?.setPermissionMode(mode)
+  await active?.setMode(mode)
   setState({ mode })
 }
 
@@ -591,17 +372,18 @@ export const useModel = async (name: string): Promise<boolean> => {
   if (!toCodex && from === 'claude') return false
   if (toCodex) codexModel = name.toLowerCase() === 'codex' ? undefined : name
   if (toCodex && from === 'codex') {
-    setState({ model: codexModel ? codex.modelName(codexModel) : 'Codex' })
+    await active?.setModel(name)
     push({ kind: 'note', text: `Codex now uses ${getState().model}.`, tone: 'dim' })
     return true
   }
   const kept = getState().entries
+  const label = active?.label ?? 'Claude Code'
   setState({ provider: toCodex ? 'codex' : 'claude', model: '' })
   await restart()
-  if (!toCodex) await session?.setModel(name).catch(() => push({ kind: 'note', text: `Claude Code doesn't know ${name}.`, tone: 'error' }))
-  refreshContext()
+  if (!toCodex) await active?.setModel(name).catch(() => push({ kind: 'note', text: `Claude Code doesn't know ${name}.`, tone: 'error' }))
+  active?.refresh()
   // The conversation stays on screen, and goes along with the next prompt.
-  handoff = handoffFrom(kept, from === 'codex' ? 'Codex' : 'Claude Code')
+  handoff = handoffFrom(kept, label)
   const now = !toCodex ? 'Back to Claude Code.' : codexModel ? `Now talking to ${getState().model} through Codex.` : 'Now talking to Codex.'
   setState(s => ({
     entries: [...kept, ...s.entries, { kind: 'note', text: handoff ? `${now} It gets the conversation so far with your next message.` : now, tone: 'dim' }],

@@ -209,7 +209,11 @@ src/
   index.ts      entry point: full screen or plain mode
   tui.tsx       the full-screen app (Ink)
   plain.ts      line-by-line mode
-  session.ts    the background Claude Code session
+  session.ts    the harness: runs the conversation with the active provider
+  provider.ts   what Milo needs from a provider, and the events it reports
+  providers/    Claude Code and Codex as providers
+  codex.ts      running a Codex turn, its models and its header numbers
+  delegate.ts   the Codex agent tool Milo gives Claude
   commands.ts   Milo's slash commands
   explorer.ts   the file tree
   editor.ts     the code editor
