@@ -18,6 +18,7 @@ import { appendOutput, changeDir, completeCommand, loadCommands, runCommand, sto
 import { clickAt, column, editorKey, follow, insertText, isDirty, openDoc, reload, renderLine, save, type Doc } from './editor.js'
 import { getState, push, setState, useStore, type Diff, type State } from './store.js'
 import * as session from './session.js'
+import { codexModels } from './codex.js'
 import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
 import { shade, THEME_NAMES } from './theme.js'
 import type { SDKSessionInfo } from '@anthropic-ai/claude-agent-sdk'
@@ -46,6 +47,7 @@ const HELP = [
   '  /status        show the session, model, mode and account',
   '  /mode [name]   show or switch permission mode',
   '  /agents        list the subagents Claude can use',
+  '  /model [name]  switch model; an OpenAI one (or codex) moves to Codex, a Claude one moves back',
   '  /milo [size]   show the mascot (small or big; thinking, working or error)',
   '  /char [name]   list the mascots, or switch to one: milo, boo or none',
   '  /diff          show or hide the last file change',
@@ -83,19 +85,32 @@ const HELP = [
   '  Ctrl+← / →     move by word; Ctrl+Home / End go to the start or end',
   '  Esc            back to the explorer; Ctrl+B closes both and goes back to talking to Milo',
   'Image files named in a prompt (typed or dragged in) are sent as pictures.',
-  'Anything else, including Claude Code commands like /model, /context, /compact and /usage, goes to Claude.',
+  'Anything else, including Claude Code commands like /context, /compact and /usage, goes to Claude.',
   `Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`,
 ].join('\n')
 
+// Claude Code's model aliases, for when it isn't running to list its own.
+const CLAUDE_MODELS = ['default', 'opus', 'sonnet', 'haiku', 'fable']
+
 // Milo's own commands, suggested ahead of Claude Code's, and their options.
-const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'status', 'mode', 'agents', 'milo', 'char', 'diff', 'copy', 'settings', 'theme', 'new', 'exit']
+const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'status', 'mode', 'agents', 'model', 'milo', 'char', 'diff', 'copy', 'settings', 'theme', 'new', 'exit']
 const OPTIONS: Record<string, readonly string[]> = {
   mode: session.MODES,
+  model: [...CLAUDE_MODELS, 'codex', ...codexModels().map(m => m.slug)],
   milo: ['small', 'big', 'thinking', 'working', 'error'],
   settings: SETTING_NAMES,
   theme: THEME_NAMES,
   char: CHARACTER_NAMES,
 }
+
+const formatModels = (s: State, claude: string[], openai: string[]) =>
+  [
+    c.bold('Models'),
+    `  Now      ${s.model || c.dim('starting…')}${s.provider === 'codex' ? c.dim(' through Codex') : ''}`,
+    `  Claude   ${claude.join(', ')}`,
+    `  OpenAI   ${openai.length ? `${openai.join(', ')}, or codex for Codex's default` : c.dim('none yet: sign in with codex login')}`,
+    c.dim('/model <name> switches. Moving between Claude and OpenAI brings the conversation along.'),
+  ].join('\n')
 
 const seconds = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -831,6 +846,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const note = (text: string, tone: 'dim' | 'error' | 'raw' = 'raw') => push({ kind: 'note', text, tone })
   const ask = <T,>(work: (q: NonNullable<ReturnType<typeof session.current>>) => Promise<T>, show: (result: T) => string) => {
     const q = session.current()
+    if (getState().provider === 'codex') return note("That's a Claude Code command. /model opus goes back to Claude.", 'dim')
     if (!q) return note('Claude Code is still starting.', 'dim')
     work(q)
       .then(result => note(show(result)))
@@ -858,10 +874,33 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
         return true
       case '/status': {
         const s = getState()
+        const info = { model: s.model, mode: MODE_LABELS[s.mode] ?? s.mode, sessionId: s.sessionId, contextPct: s.contextPct }
+        if (s.provider === 'codex') {
+          note(`${formatStatus(info)}\n  Provider    OpenAI, through Codex`)
+          return true
+        }
         ask(
           q => q.accountInfo().catch(() => undefined),
-          account => formatStatus({ account, model: s.model, mode: MODE_LABELS[s.mode] ?? s.mode, sessionId: s.sessionId, contextPct: s.contextPct }),
+          account => formatStatus({ account, ...info }),
         )
+        return true
+      }
+      case '/model': {
+        if (!args[0]) {
+          // Both sides' models; Claude Code's own list needs it running.
+          const claude = session.current()?.supportedModels().then(models => models.map(m => m.value))
+          void (claude ?? Promise.resolve(CLAUDE_MODELS))
+            .catch(() => CLAUDE_MODELS)
+            .then(list => note(formatModels(getState(), list, codexModels().map(m => m.slug))))
+          return true
+        }
+        session
+          .useModel(args[0])
+          .then(switched => {
+            // A Claude model while on Claude: Claude Code's own /model sets it.
+            if (!switched) session.submit(text)
+          })
+          .catch((err: unknown) => note(err instanceof Error ? err.message : String(err), 'error'))
         return true
       }
       case '/mode': {
@@ -1237,8 +1276,9 @@ export const main = async () => {
   const app = render(<Root />, { alternateScreen: true, exitOnCtrlC: false, maxFps: 30, kittyKeyboard: { mode: 'auto' } })
   await app.waitUntilExit()
   session.close()
-  const id = getState().sessionId
-  if (id) console.log(c.dim(`Resume this conversation in Claude Code: claude --resume ${id}`))
+  const { sessionId: id, provider } = getState()
+  if (id && provider === 'codex') console.log(c.dim(`Resume this conversation in Codex: codex resume ${id}`))
+  else if (id) console.log(c.dim(`Resume this conversation in Claude Code: claude --resume ${id}`))
   console.log(c.dim('=^oo^= Bye!'))
   process.exit(0)
 }
