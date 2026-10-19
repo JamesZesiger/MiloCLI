@@ -4,6 +4,7 @@ import type { PermissionMode } from '@anthropic-ai/claude-agent-sdk'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { CHARACTER_NAMES, findCharacter, setCharacter, type CharacterName } from './characters.js'
 import { findTheme, setTheme, THEME_NAMES, type ThemeName } from './theme.js'
 
 export const SETTINGS_FILE = join(homedir(), '.milo', 'settings.toml')
@@ -18,11 +19,16 @@ const TEMPLATE = `# Milo settings. Each line looks like: key = "value"
 
 # Milo's colors: ${THEME_NAMES.join(', ')}. /theme shows them.
 # theme = "milo"
+
+# The mascot and the personality it gives Claude: ${CHARACTER_NAMES.join(', ')}.
+# none is Claude's own voice. /char shows them.
+# character = "milo"
 `
 
 export type Settings = {
   defaultMode?: PermissionMode
   theme?: ThemeName
+  character?: CharacterName
 }
 
 /** Matches "Auto", "auto mode", "accept_edits", "acceptEdits" and so on. */
@@ -51,6 +57,15 @@ const KNOWN: Record<string, Known> = {
       const theme = findTheme(value)
       if (!theme) return `theme should be one of ${THEME_NAMES.join(', ')}`
       into.theme = theme
+    },
+  },
+  character: {
+    about: `the mascot and its personality: ${CHARACTER_NAMES.join(', ')} (none is Claude's own voice)`,
+    get: from => from.character,
+    apply: (value, into) => {
+      const character = findCharacter(value)
+      if (!character) return `character should be one of ${CHARACTER_NAMES.join(', ')}`
+      into.character = character
     },
   },
 }
@@ -94,6 +109,7 @@ const load = (): { settings: Settings; problems: string[] } => {
 
 export const { settings, problems: settingsProblems } = load()
 if (settings.theme) setTheme(settings.theme)
+if (settings.character) setCharacter(settings.character)
 
 /**
  * Saves one setting to the file and to the running settings. Replaces the
@@ -121,8 +137,9 @@ export const saveSetting = (key: string, value: string): string | void => {
     return `Couldn't save ${SETTINGS_FILE}: ${err instanceof Error ? err.message : String(err)}`
   }
   Object.assign(settings, updated)
-  // A new theme shows at once; the other settings wait for the next start.
+  // A new theme or mascot shows at once; the other settings wait for the next start.
   if (key === 'theme' && updated.theme) setTheme(updated.theme)
+  if (key === 'character' && updated.character) setCharacter(updated.character)
 }
 
 /** Every setting, its value (or "not set") and what it means. */

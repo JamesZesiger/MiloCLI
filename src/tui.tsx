@@ -5,12 +5,13 @@ import { Box, Text, render, useApp, useInput, usePaste, useStdin, useStdout, use
 import wrapAnsi from 'wrap-ansi'
 import stringWidth from 'string-width'
 import { basename, relative } from 'node:path'
+import { CHARACTER_NAMES, mascot } from './characters.js'
 import { c, type Mood } from './milo.js'
 import { portrait, type Size } from './portrait.js'
 import { align } from './diff.js'
 import { logLines } from './render.js'
 import { highlight, isEmpty, selectedText, type Selection } from './select.js'
-import { completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
+import { characterCommand, completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
 import { pasteImage } from './images.js'
 import { treeRows, type Row } from './explorer.js'
 import { appendOutput, changeDir, completeCommand, loadCommands, runCommand, stopCommand } from './terminal.js'
@@ -26,13 +27,6 @@ const HEADER_HEIGHT = 8
 // How long a status-line notice shows, and so how long "press again to…" waits.
 const NOTICE_MS = 3000
 const FRAMES = ['·', '✢', '✺', '✶', '✻', '✽'] // text characters only: ✳ shows as a green emoji in some terminals
-
-const FACES: Record<Mood, string> = {
-  idle: '|ᐠ｡ꞈ｡ᐟ|',
-  thinking: '|ᐠ-ꞈ-ᐟ|',
-  working: '|ᐠ•ꞈ•ᐟ|',
-  error: '|ᐠ×ꞈ×ᐟ|',
-}
 
 const MODE_LABELS: Record<string, string> = {
   default: 'Default mode',
@@ -52,7 +46,8 @@ const HELP = [
   '  /status        show the session, model, mode and account',
   '  /mode [name]   show or switch permission mode',
   '  /agents        list the subagents Claude can use',
-  '  /milo [size]   show Milo (small or big; thinking, working or error)',
+  '  /milo [size]   show the mascot (small or big; thinking, working or error)',
+  '  /char [name]   list the mascots, or switch to one: milo, boo or none',
   '  /diff          show or hide the last file change',
   '  /copy [n]      copy the last reply, or the nth from last, to the clipboard',
   '  /settings      show Milo\'s settings, or save one: /settings default_mode Auto',
@@ -66,6 +61,7 @@ const HELP = [
   '  Ctrl+B         show or hide the file explorer',
   '  Ctrl+V / Alt+V paste an image from the clipboard',
   '  Drag           select text in the workspace; letting go copies it',
+  '  Shift+Enter    new line (Alt+Enter where the terminal sends Shift+Enter as Enter)',
   '  Shift+Tab      switch permission mode',
   '  Esc            stop a reply, or close the diff',
   '  Ctrl+C         stop a reply (twice forces it), clear the input, or leave (press twice)',
@@ -92,12 +88,13 @@ const HELP = [
 ].join('\n')
 
 // Milo's own commands, suggested ahead of Claude Code's, and their options.
-const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'status', 'mode', 'agents', 'milo', 'diff', 'copy', 'settings', 'theme', 'new', 'exit']
+const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'status', 'mode', 'agents', 'milo', 'char', 'diff', 'copy', 'settings', 'theme', 'new', 'exit']
 const OPTIONS: Record<string, readonly string[]> = {
   mode: session.MODES,
   milo: ['small', 'big', 'thinking', 'working', 'error'],
   settings: SETTING_NAMES,
   theme: THEME_NAMES,
+  char: CHARACTER_NAMES,
 }
 
 const seconds = (ms: number) => {
@@ -247,8 +244,8 @@ const Header = ({ width, s }: { width: number; s: State }) => {
   const pct = s.contextPct === undefined ? '–' : `${s.contextPct}%`
   const agents = `${s.agents} agent${s.agents === 1 ? '' : 's'} · ${s.busy ? 'working' : 'idle'}`
   const info = [
-    c.bold(c.accent('Milo')),
-    'your coding cat, powered by Claude Code',
+    c.bold(c.accent(mascot().name)),
+    mascot().about,
     c.dim(shortPath(process.cwd(), Math.max(16, width - 50))),
     '',
     c.dim('/help for commands · Ctrl+C stops a reply'),
@@ -311,7 +308,7 @@ const Workspace = ({
   let view: string[]
   if (!lines.length) {
     view = [
-      c.dim('Ask Milo anything.'),
+      c.dim(`Ask ${mascot().name} anything.`),
       c.dim('PgUp/PgDn scrolls · drag to select and copy · Ctrl+O shows the last file change · Ctrl+B browses files · Shift+Tab switches mode'),
     ]
   } else {
@@ -510,7 +507,7 @@ const StatusLine = ({ width, s, frame, now, notice }: { width: number; s: State;
   return (
     <Box width={width} height={1}>
       <Text wrap="truncate">
-        {`${c.accent(FACES[s.mood])} ${message}  ${c.dim(time)}  ${c.dim(tools)}`}
+        {`${c.accent(mascot().faces[s.mood])} ${message}  ${c.dim(time)}  ${c.dim(tools)}`}
       </Text>
     </Box>
   )
@@ -557,12 +554,14 @@ const inputLines = (s: State, input: string, cursor: number, width: number, ghos
 }
 
 const InputBox = ({ width, lines, mood }: { width: number; lines: string[]; mood: Mood }) => {
-  // Milo's paws rest on the top edge, centered under the face on the status
+  // A cat's paws rest on the top edge, centered under the face on the status
   // line (which starts above the corner) and in the same accent color.
   const paws = 'U─U'
-  const before = Math.max(0, Math.floor((stringWidth(FACES[mood]) - paws.length) / 2) - 1)
+  const before = Math.max(0, Math.floor((stringWidth(mascot().faces[mood]) - paws.length) / 2) - 1)
   const after = Math.max(0, width - 2 - before - paws.length)
-  const top = `┌${'─'.repeat(before)}${c.accent("U")}${"─"}${c.accent("U")}${'─'.repeat(after)}┐`
+  const top = mascot().paws
+    ? `┌${'─'.repeat(before)}${c.accent("U")}${"─"}${c.accent("U")}${'─'.repeat(after)}┐`
+    : `┌${'─'.repeat(width - 2)}┐`
   return (
     <Box flexDirection="column" width={width}>
       <Text>{top}</Text>
@@ -704,6 +703,22 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     const gap = at > 0 && !/\s/.test(text[at - 1]!) ? ' ' : ''
     const added = `${gap}${word} `
     edit(text.slice(0, at) + added + text.slice(at), at + added.length)
+  }
+
+  /** Adds the clipboard's image at the cursor, or `fallback` (the pasted text) when there is none. */
+  const pasteClipboardImage = (fallback = '') => {
+    setNotice('Checking the clipboard…')
+    void pasteImage().then(file => {
+      // The clipboard takes a moment; insert uses where the cursor is now.
+      if (file) {
+        insert(file)
+        return setNotice('Image pasted')
+      }
+      if (!fallback) return setNotice('No image on the clipboard')
+      const { input: text, cursor: at } = typing.current
+      edit(text.slice(0, at) + fallback + text.slice(at), at + fallback.length)
+      setNotice('')
+    })
   }
 
   const warn = (text: string) => setNotice(c.accent(text))
@@ -879,7 +894,14 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       case '/settings': {
         const result = settingsCommand(text.slice(name!.length))
         note(result.text, result.ok ? 'raw' : 'error')
-        if (result.ok && args.length && args[0] !== 'theme') note('It takes effect the next time Milo starts. /mode switches now.', 'dim')
+        if (result.ok && args[0] === 'character') session.restyle()
+        else if (result.ok && args.length && args[0] !== 'theme') note('It takes effect the next time Milo starts. /mode switches now.', 'dim')
+        return true
+      }
+      case '/char': {
+        const result = characterCommand(text.slice(name!.length))
+        note(result.text, result.ok ? 'raw' : 'error')
+        if (result.changed) session.restyle()
         return true
       }
       case '/theme': {
@@ -1007,6 +1029,9 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
 
   usePaste(text => {
     if (focus === 'editor' && doc) return setDoc(follow(insertText(doc, text, false), editorHeight, editorWidth))
+    // Copying a picture in a browser or app often puts its link on the clipboard
+    // too, and the terminal pastes that (or nothing) instead of the picture.
+    if (!text.trim() || /^\s*https?:\/\/\S+\s*$/.test(text)) return pasteClipboardImage(text.trim())
     const clean = text.replace(/\r\n?/g, '\n')
     edit(input.slice(0, cursor) + clean + input.slice(cursor), cursor + clean.length)
   })
@@ -1095,13 +1120,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       return
     }
     if ((key.ctrl || key.meta) && ch === 'v') {
-      setNotice('Checking the clipboard…')
-      void pasteImage().then(file => {
-        if (!file) return setNotice('No image on the clipboard')
-        // The clipboard takes a moment; insert uses where the cursor is now.
-        insert(file)
-        setNotice('Image pasted')
-      })
+      pasteClipboardImage()
       return
     }
     if (key.ctrl && ch === 'd') {
@@ -1119,6 +1138,8 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       setTermScroll(0)
       return
     }
+    // Shift+Enter (kitty keyboard terminals) or Alt+Enter starts a new line.
+    if (key.return && (key.shift || key.meta)) return edit(input.slice(0, cursor) + '\n' + input.slice(cursor), cursor + 1)
     if (key.return) return submit()
     // Most terminals send Backspace as DEL, which Ink reports as delete.
     if (key.backspace || key.delete) {
@@ -1207,7 +1228,7 @@ export const main = async () => {
       .catch(() => push({ kind: 'note', text: `${MODE_LABELS[mode]} isn't available here, so Milo started in the default mode.`, tone: 'error' }))
   // If Milo crashes, don't leave the terminal reporting mouse clicks.
   process.once('exit', () => process.stdout.write(MOUSE_OFF))
-  const app = render(<Root />, { alternateScreen: true, exitOnCtrlC: false, maxFps: 30 })
+  const app = render(<Root />, { alternateScreen: true, exitOnCtrlC: false, maxFps: 30, kittyKeyboard: { mode: 'auto' } })
   await app.waitUntilExit()
   session.close()
   const id = getState().sessionId

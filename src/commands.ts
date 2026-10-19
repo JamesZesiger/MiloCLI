@@ -9,6 +9,8 @@ import {
   type SDKSessionInfo,
   type SlashCommand,
 } from '@anthropic-ai/claude-agent-sdk'
+import stringWidth from 'string-width'
+import { CHARACTER_NAMES, CHARACTERS, characterName, findCharacter, setCharacter } from './characters.js'
 import { c, paint } from './milo.js'
 import { describeSettings, saveSetting, SETTINGS_FILE } from './settings.js'
 import { findTheme, setTheme, THEME_NAMES, THEMES, themeName } from './theme.js'
@@ -53,6 +55,31 @@ export const themeCommand = (args: string): { text: string; ok: boolean } => {
   setTheme(name)
   const problem = saveSetting('theme', name)
   return problem ? { ok: false, text: `Switched to ${name}, but ${problem}` } : { ok: true, text: `Switched to the ${name} theme.` }
+}
+
+/**
+ * /char: lists the mascots, or switches to one and saves it for next time.
+ * `changed` says whether Claude Code needs restarting for the new personality.
+ */
+export const characterCommand = (args: string): { text: string; ok: boolean; changed?: boolean } => {
+  const wanted = args.trim()
+  if (!wanted) {
+    const width = Math.max(...CHARACTER_NAMES.map(name => name.length))
+    const faceWidth = Math.max(...CHARACTER_NAMES.map(name => stringWidth(CHARACTERS[name].faces.idle)))
+    const rows = CHARACTER_NAMES.map(name => {
+      const mark = name === characterName() ? c.focus('❯') : ' '
+      const face = CHARACTERS[name].faces.idle
+      return ` ${mark} ${name.padEnd(width)}  ${face}${' '.repeat(faceWidth - stringWidth(face))}  ${c.dim(CHARACTERS[name].about)}`
+    })
+    return { ok: true, text: [c.bold('Characters'), ...rows, c.dim('/char <name> switches; Milo remembers it.')].join('\n') }
+  }
+  const name = findCharacter(wanted)
+  if (!name) return { ok: false, text: `Unknown character ${wanted}. Choose from: ${CHARACTER_NAMES.join(', ')}` }
+  if (name === characterName()) return { ok: true, text: `${CHARACTERS[name].name} is already here.` }
+  setCharacter(name)
+  const problem = saveSetting('character', name)
+  const hello = name === 'none' ? 'No mascot: Claude speaks for itself.' : `${CHARACTERS[name].name} is here.`
+  return problem ? { ok: false, text: `Switched to ${name}, but ${problem}`, changed: true } : { ok: true, text: hello, changed: true }
 }
 
 /** Built-in commands like /context and /model reply with one unstreamed message. */

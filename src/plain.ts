@@ -3,9 +3,11 @@
 import { query, type CanUseTool, type SDKMessage, type SDKSessionInfo, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import * as readline from 'node:readline/promises'
 import { stdin, stdout } from 'node:process'
-import { c, face, small, pick, VERBS, PAST, PERSONA, type Mood } from './milo.js'
+import { CHARACTER_NAMES, mascot, persona } from './characters.js'
+import { c, pick, type Mood } from './milo.js'
 import { portrait, width, type Size } from './portrait.js'
 import {
+  characterCommand,
   commandNames,
   completion,
   formatAgents,
@@ -22,6 +24,9 @@ import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './sett
 import { THEME_NAMES } from './theme.js'
 
 const isTTY = stdout.isTTY === true
+
+const face = (mood: Mood) => mascot().face(mood)
+const small = (mood: Mood) => mascot().small(mood)
 
 // --- Input queue: one long-lived session, fed a message per prompt ---------
 
@@ -57,7 +62,7 @@ const stopSpinner = () => {
 const startSpinner = (mood: Mood) => {
   stopSpinner()
   if (!isTTY) return
-  const verb = pick(VERBS)
+  const verb = pick(mascot().verbs)
   let i = 0
   spinner = setInterval(() => {
     stdout.write(`\r\x1b[2K${c.accent(FRAMES[i++ % FRAMES.length]!)} ${small(mood)} ${c.dim(`${verb}…`)}`)
@@ -89,8 +94,8 @@ const drawFace = (mood: Mood, info: string[] = [], size: Size = 'tiny') => {
 
 const banner = () => {
   const info = [
-    c.bold(c.accent('Milo')),
-    c.dim('your coding cat, powered by Claude Code'),
+    c.bold(c.accent(mascot().name)),
+    c.dim(mascot().about),
     c.dim(process.cwd()),
     '',
     c.dim('/help for commands · Ctrl+C stops a reply'),
@@ -109,7 +114,8 @@ const HELP = `${c.bold('Commands')}
   /resume [n]   list recent conversations here, or pick one up
   /continue     pick up the most recent conversation here
   /agents       list the subagents Claude can use
-  /milo         show Milo (add small or big, and thinking, working or error)
+  /milo         show the mascot (add small or big, and thinking, working or error)
+  /char         list the mascots, or switch to one: milo, boo or none
   /settings     show Milo's settings, or save one: /settings default_mode Auto
   /theme        list the color themes, or switch to one: /theme ocean
   /new          start a fresh conversation
@@ -120,8 +126,8 @@ const HELP = `${c.bold('Commands')}
   Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`
 
 // Milo's own commands, suggested ahead of Claude Code's, and their options.
-const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'agents', 'milo', 'settings', 'theme', 'new', 'exit']
-const OPTIONS = { milo: ['small', 'big', 'thinking', 'working', 'error'], settings: SETTING_NAMES, theme: THEME_NAMES }
+const MILO_COMMANDS = ['help', 'commands', 'resume', 'continue', 'agents', 'milo', 'char', 'settings', 'theme', 'new', 'exit']
+const OPTIONS = { milo: ['small', 'big', 'thinking', 'working', 'error'], settings: SETTING_NAMES, theme: THEME_NAMES, char: CHARACTER_NAMES }
 let commandList = MILO_COMMANDS
 
 // Tab finishes the command being typed.
@@ -180,7 +186,7 @@ const canUseTool: CanUseTool = async (tool, input, { suggestions, decisionReason
     return { behavior: 'allow', updatedInput: { ...input, answers } }
   }
 
-  line(`${c.accent(small('working'))} ${c.bold('Milo wants to use')} ${c.focus(tool)}`)
+  line(`${c.accent(small('working'))} ${c.bold(`${mascot().name} wants to use`)} ${c.focus(tool)}`)
   const detail = summarize(tool, input)
   if (detail) line(`  ${detail}`)
   if (decisionReason) line(c.dim(`  ${clip(decisionReason)}`))
@@ -226,7 +232,7 @@ const handle = (msg: SDKMessage) => {
         if (!replyStarted) {
           replyStarted = true
           line()
-          line(`${c.accent(small('idle'))} ${c.bold(c.accent('Milo'))}`)
+          line(`${c.accent(small('idle'))} ${c.bold(c.accent(mascot().name))}`)
         }
         write(event.delta.text)
       }
@@ -239,7 +245,7 @@ const handle = (msg: SDKMessage) => {
       if (reply) {
         stopSpinner()
         line()
-        line(`${c.accent(small('idle'))} ${c.bold(c.accent('Milo'))}`)
+        line(`${c.accent(small('idle'))} ${c.bold(c.accent(mascot().name))}`)
         line(reply)
       }
       for (const block of msg.message.content) {
@@ -272,8 +278,8 @@ const handle = (msg: SDKMessage) => {
       const seconds = Math.max(1, Math.round((Date.now() - turnStarted) / 1000))
       const cost = billedPerToken && msg.total_cost_usd ? ` · session $${msg.total_cost_usd.toFixed(2)}` : ''
       line()
-      if (msg.subtype === 'success') line(c.dim(`${small('idle')} Milo ${pick(PAST)} · ${seconds}s${cost}`))
-      else line(c.error(`${small('error')} Milo stopped (${msg.subtype.replaceAll('_', ' ')})`))
+      if (msg.subtype === 'success') line(c.dim(`${small('idle')} ${mascot().name} ${pick(mascot().past)} · ${seconds}s${cost}`))
+      else line(c.error(`${small('error')} ${mascot().name} stopped (${msg.subtype.replaceAll('_', ' ')})`))
       line()
       endTurn()
       return
@@ -293,7 +299,7 @@ const startSession = (resume?: string) => {
       cwd: process.cwd(),
       resume,
       includePartialMessages: true,
-      systemPrompt: { type: 'preset', preset: 'claude_code', append: PERSONA },
+      systemPrompt: { type: 'preset', preset: 'claude_code', append: persona() },
       settingSources: ['user', 'project', 'local'],
       canUseTool,
     },
@@ -330,6 +336,15 @@ const resumeSession = (id: string | undefined) => {
   sessionId = undefined
   startSession(id)
   line(c.dim(`${small('idle')} Resumed ${id}.`))
+}
+
+// The personality is part of the system prompt, fixed when Claude Code starts,
+// so a new mascot restarts it on the same conversation.
+const restyle = () => {
+  const id = sessionId
+  closeSession()
+  sessionId = undefined
+  startSession(id)
 }
 
 const closeSession = () => {
@@ -388,7 +403,15 @@ const main = async () => {
     if (name === '/settings') {
       const result = settingsCommand(text.slice(name.length))
       line(result.ok ? result.text : c.error(result.text))
-      if (result.ok && arg && arg !== 'theme') line(c.dim('It takes effect the next time Milo starts.'))
+      if (result.ok && arg === 'character') restyle()
+      else if (result.ok && arg && arg !== 'theme') line(c.dim('It takes effect the next time Milo starts.'))
+      line()
+      continue
+    }
+    if (name === '/char') {
+      const result = characterCommand(text.slice(name.length))
+      line(result.ok ? result.text : c.error(result.text))
+      if (result.changed) restyle()
       line()
       continue
     }
