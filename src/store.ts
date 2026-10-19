@@ -42,6 +42,8 @@ export type State = {
   entries: Entry[]
   model: string
   contextPct: number | undefined
+  /** Percent of the 5-hour plan limit on a subscription, or the session's cost. */
+  usage: string | undefined
   mode: string
   agents: number
   busy: boolean
@@ -64,6 +66,7 @@ let state: State = {
   entries: [],
   model: '',
   contextPct: undefined,
+  usage: undefined,
   mode: 'default',
   agents: 0,
   busy: false,

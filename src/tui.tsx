@@ -250,7 +250,13 @@ const Header = ({ width, s }: { width: number; s: State }) => {
     '',
     c.dim('/help for commands · Ctrl+C stops a reply'),
   ]
-  const right = [s.model || c.dim('starting…'), `🧠 ${pct} context`, MODE_LABELS[s.mode] ?? s.mode, agents]
+  const right = [
+    s.model || c.dim('starting…'),
+    MODE_LABELS[s.mode] ?? s.mode,
+    `📊 ${s.usage ?? '–'} usage`,
+    `🧠 ${pct} context`,
+    agents,
+  ]
   return (
     <Box borderStyle="round" height={HEADER_HEIGHT} width={width} paddingX={1}>
       {showArt && (

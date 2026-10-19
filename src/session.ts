@@ -192,6 +192,16 @@ const refreshContext = () =>
     .then(usage => setState({ contextPct: Math.round(usage.percentage), model: modelName(usage.model) }))
     .catch(() => {})
 
+const refreshUsage = () =>
+  session
+    ?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true })
+    .then(usage => {
+      const used = usage.rate_limits?.five_hour?.utilization
+      if (used != null) setState({ usage: `${Math.round(used)}%` })
+      else if (!usage.subscription_type) setState({ usage: `$${usage.session.total_cost_usd.toFixed(2)}` })
+    })
+    .catch(() => {})
+
 /** claude-opus-5-5 → Opus 5.5; anything else as given. */
 const modelName = (id: string) => {
   const match = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:\b|$)/.exec(id)
@@ -206,6 +216,7 @@ const handle = (msg: SDKMessage) => {
       if (msg.subtype === 'init') {
         setState({ sessionId: msg.session_id, mode: msg.permissionMode, model: modelName(msg.model) })
         refreshContext()
+        refreshUsage()
       } else if (msg.subtype === 'task_started') {
         tasks.add(msg.task_id)
         countAgents()
@@ -268,6 +279,7 @@ const handle = (msg: SDKMessage) => {
       push({ kind: 'note', text: `${outcome} · ${Math.max(1, Math.round(ms / 1000))}s${cost}`, tone: ok ? 'dim' : 'error' })
       setState({ busy: false, mood: ok ? 'idle' : 'error', status: outcome, lastTurnMs: ms, currentTool: undefined })
       refreshContext()
+      refreshUsage()
       if (movedTo || restyled) follow()
       const next = queued.shift()
       if (next !== undefined) submit(next)
@@ -393,6 +405,7 @@ export const restart = async (resume?: string) => {
     status: resume ? 'Resumed' : 'Fresh start',
     agents: 0,
     contextPct: undefined,
+    usage: undefined,
     lastDiff: undefined,
     showDiff: false,
     pending: undefined,
