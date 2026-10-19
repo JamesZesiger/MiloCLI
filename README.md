@@ -10,6 +10,8 @@ who reacts as Claude thinks and works.
 - Node.js 20 or later
 - Claude Code signed in on this machine (or `ANTHROPIC_API_KEY` set). Milo uses
   the same account, settings, skills and subagents as Claude Code.
+- Optional, for OpenAI models: Codex signed in with `codex login` (a ChatGPT
+  plan works; no API key needed).
 
 ## Getting started
 
@@ -62,6 +64,7 @@ edits, Plan and Auto.
 | `/status`        | Show the folder, session, model, mode and account              |
 | `/mode [name]`   | Show or switch the permission mode                             |
 | `/agents`        | List the subagents Claude can use                              |
+| `/model [name]`  | Switch model: an OpenAI one, or `codex`, moves to Codex; a Claude one moves back |
 | `/milo [size]`   | Show the mascot: `small` or `big`, or `thinking`, `working`, `error` |
 | `/char [name]`   | List the mascots, or switch to one: `milo`, `boo` or `none`    |
 | `/diff`          | Show or hide the last file change                              |
@@ -71,8 +74,36 @@ edits, Plan and Auto.
 | `/new`           | Start a fresh conversation                                     |
 | `/exit`          | Leave                                                          |
 
-Anything else, including Claude Code commands like `/model`, `/context`,
-`/compact` and `/usage`, goes straight to Claude.
+Anything else, including Claude Code commands like `/context`, `/compact` and
+`/usage`, goes straight to Claude.
+
+### OpenAI models through Codex
+
+`/model gpt-5.6-sol` (or any model Codex lists, or `/model codex` for Codex's
+default) hands the conversation to Codex, signed in with your ChatGPT plan.
+`/model opus` goes back to Claude. Claude Code and Codex can't read each
+other's conversations, so a switch starts a new one there and sends along what's
+on screen (your prompts, the replies and the tool calls, up to about 8,000
+characters, newest kept) with your next message. Switching between two models
+on the same side keeps the conversation as it is.
+The header's usage and context come from Codex's own log of the thread.
+
+Codex can't ask before each action, so the permission mode picks its sandbox:
+Plan reads only, Default and Accept edits can change files in the folder, and
+Auto has full access. Claude Code's own commands, subagents and questions
+aren't there with Codex, and Ctrl+O shows a file's change since the last
+commit. Plain mode always uses Claude.
+
+### Codex agents for Claude
+
+While you talk to Claude, Milo gives it a `Codex agent` tool, so you can say
+"have a Codex agent on gpt-6-astra fix the failing test". Claude writes the
+agent a brief, Milo asks you before it starts (like any tool), and the agent
+works in the folder on your ChatGPT plan. Claude gets back the agent's report,
+the commands it ran and the files it changed, plus a thread id it can pass back
+to send the same agent round again for fixes or follow-ups. The header counts
+it as an agent while it runs, and the status line shows its current command.
+It's read-only in Plan mode, or whenever Claude asks for a review only.
 
 ### Keys
 

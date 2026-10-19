@@ -9,8 +9,8 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node20',
-  // The SDK starts Claude Code from files next to it, so it stays a package.
-  external: ['@anthropic-ai/claude-agent-sdk'],
+  // The SDKs start Claude Code and Codex from files next to them, so they stay packages.
+  external: ['@anthropic-ai/claude-agent-sdk', '@openai/codex-sdk'],
   alias: { 'react-devtools-core': './build/devtools-stub.js' },
   banner: { js: "import { createRequire as __milo_require } from 'node:module'; const require = __milo_require(import.meta.url);" },
   define: { 'process.env.NODE_ENV': '"production"' },

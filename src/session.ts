@@ -1,6 +1,7 @@
 // The background Claude Code session for the full-screen app: sends prompts,
 // turns the SDK's messages into log entries and state, and routes permission
-// requests and questions to the screen.
+// requests and questions to the screen. With an OpenAI model picked, prompts
+// go to Codex instead (see codex.ts).
 import {
   query,
   type CanUseTool,
@@ -9,6 +10,8 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import * as codex from './codex.js'
+import * as delegate from './delegate.js'
 import { commandNames, history, syntheticText } from './commands.js'
 import { withImages, type Content } from './images.js'
 import { mascot, persona } from './characters.js'
@@ -119,6 +122,8 @@ const appendText = (text: string) =>
 const updateTool = (id: string, patch: Partial<Extract<Entry, { kind: 'tool' }>>) =>
   setState(s => ({ entries: s.entries.map(e => (e.kind === 'tool' && e.id === id ? { ...e, ...patch } : e)) }))
 
+const toolName = (name: string) => (name === delegate.TOOL ? 'Codex agent' : name)
+
 // Subagents: Agent tool calls in flight plus background tasks.
 const agentCalls = new Set<string>()
 const tasks = new Set<string>()
@@ -156,7 +161,7 @@ const canUseTool: CanUseTool = (tool, input, { signal, suggestions, decisionReas
       lastDiff: diff ?? s.lastDiff,
       pending: {
         kind: 'permission',
-        tool,
+        tool: toolName(tool),
         detail: summarize(input),
         reason: decisionReason,
         diff,
@@ -164,7 +169,7 @@ const canUseTool: CanUseTool = (tool, input, { signal, suggestions, decisionReas
         resolve: (choice: Choice) => {
           setState({ pending: undefined, showDiff: false })
           if (choice === 'no') {
-            push({ kind: 'note', text: `Declined ${tool}`, tone: 'dim' })
+            push({ kind: 'note', text: `Declined ${toolName(tool)}`, tone: 'dim' })
             resolve({ behavior: 'deny', message: DECLINED })
           } else if (choice === 'always' && canAlways)
             resolve({ behavior: 'allow', updatedInput: input, updatedPermissions: suggestions })
@@ -192,6 +197,16 @@ const refreshContext = () =>
     .then(usage => setState({ contextPct: Math.round(usage.percentage), model: modelName(usage.model) }))
     .catch(() => {})
 
+const refreshUsage = () =>
+  session
+    ?.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true })
+    .then(usage => {
+      const used = usage.rate_limits?.five_hour?.utilization
+      if (used != null) setState({ usage: `${Math.round(used)}%` })
+      else if (!usage.subscription_type) setState({ usage: `$${usage.session.total_cost_usd.toFixed(2)}` })
+    })
+    .catch(() => {})
+
 /** claude-opus-5-5 → Opus 5.5; anything else as given. */
 const modelName = (id: string) => {
   const match = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:\b|$)/.exec(id)
@@ -206,6 +221,7 @@ const handle = (msg: SDKMessage) => {
       if (msg.subtype === 'init') {
         setState({ sessionId: msg.session_id, mode: msg.permissionMode, model: modelName(msg.model) })
         refreshContext()
+        refreshUsage()
       } else if (msg.subtype === 'task_started') {
         tasks.add(msg.task_id)
         countAgents()
@@ -229,15 +245,15 @@ const handle = (msg: SDKMessage) => {
       for (const block of msg.message.content) {
         if (block.type !== 'tool_use') continue
         const input = block.input as Record<string, unknown>
-        push({ kind: 'tool', id: block.id, name: block.name, detail: summarize(input), status: 'running' })
-        if (block.name === 'Agent' || block.name === 'Task') {
+        push({ kind: 'tool', id: block.id, name: toolName(block.name), detail: summarize(input), status: 'running' })
+        if (block.name === 'Agent' || block.name === 'Task' || block.name === delegate.TOOL) {
           agentCalls.add(block.id)
           countAgents()
         }
         const diff = diffFor(block.name, input)
         setState(s => ({
           mood: 'working',
-          currentTool: block.name,
+          currentTool: toolName(block.name),
           turnTools: s.turnTools + 1,
           status: pick(mascot().verbs),
           lastDiff: diff ?? s.lastDiff,
@@ -260,23 +276,74 @@ const handle = (msg: SDKMessage) => {
     }
 
     case 'result': {
-      clearStop()
-      const ms = Date.now() - getState().turnStarted
-      const ok = msg.subtype === 'success'
-      const outcome = ok ? `${mascot().name} ${pick(mascot().past)}` : `Stopped (${msg.subtype.replaceAll('_', ' ')})`
       const cost = billedPerToken && msg.total_cost_usd ? ` · $${msg.total_cost_usd.toFixed(2)}` : ''
-      push({ kind: 'note', text: `${outcome} · ${Math.max(1, Math.round(ms / 1000))}s${cost}`, tone: ok ? 'dim' : 'error' })
-      setState({ busy: false, mood: ok ? 'idle' : 'error', status: outcome, lastTurnMs: ms, currentTool: undefined })
-      refreshContext()
-      if (movedTo || restyled) follow()
-      const next = queued.shift()
-      if (next !== undefined) submit(next)
+      endTurn(msg.subtype === 'success' ? undefined : msg.subtype.replaceAll('_', ' '), cost)
       return
     }
   }
 }
 
+/** A turn is over: says how it went, then moves, restyles or sends the next prompt. */
+const endTurn = (failure?: string, cost = '') => {
+  clearStop()
+  const ms = Date.now() - getState().turnStarted
+  const outcome = failure === undefined ? `${mascot().name} ${pick(mascot().past)}` : `Stopped (${failure})`
+  push({ kind: 'note', text: `${outcome} · ${Math.max(1, Math.round(ms / 1000))}s${cost}`, tone: failure === undefined ? 'dim' : 'error' })
+  setState({ busy: false, mood: failure === undefined ? 'idle' : 'error', status: outcome, lastTurnMs: ms, currentTool: undefined })
+  if (getState().provider === 'codex') refreshCodex()
+  else {
+    refreshContext()
+    refreshUsage()
+  }
+  if (movedTo || restyled) follow()
+  const next = queued.shift()
+  if (next !== undefined) submit(next)
+}
+
+// --- Codex: OpenAI models, one turn per prompt ----------------------------
+
+let codexTurn: AbortController | undefined
+// undefined is Codex's own default model.
+let codexModel: string | undefined
+
+const refreshCodex = () => {
+  const id = getState().sessionId
+  const found = id ? codex.status(id) : {}
+  setState(s => ({
+    model: found.model ?? s.model,
+    contextPct: found.contextPct ?? s.contextPct,
+    usage: found.usage ?? s.usage,
+  }))
+}
+
+const startCodex = (resume?: string) => {
+  setState({ sessionId: resume, model: codexModel ? codex.modelName(codexModel) : 'Codex', commands: [] })
+  if (resume) refreshCodex()
+}
+
+const sendCodex = (text: string, images: string[]) => {
+  const turn = new AbortController()
+  codexTurn = turn
+  void codex
+    .run({
+      threadId: getState().sessionId,
+      model: codexModel,
+      mode: getState().mode,
+      text,
+      images,
+      signal: turn.signal,
+      onThread: id => turn === codexTurn && setState({ sessionId: id }),
+    })
+    .then(end => {
+      if (turn !== codexTurn) return
+      codexTurn = undefined
+      if (!end.ok && end.error) push({ kind: 'note', text: `Codex: ${end.error}`, tone: 'error' })
+      endTurn(end.ok ? undefined : end.stopped ? 'interrupted' : 'error')
+    })
+}
+
 export const start = (resume?: string, permissionMode?: PermissionMode) => {
+  if (getState().provider === 'codex') return startCodex(resume)
   inbox = createInbox()
   const current = query({
     prompt: inbox.messages,
@@ -287,6 +354,7 @@ export const start = (resume?: string, permissionMode?: PermissionMode) => {
       includePartialMessages: true,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: persona() },
       settingSources: ['user', 'project', 'local'],
+      mcpServers: { codex: delegate.server() },
       canUseTool,
     },
   })
@@ -312,6 +380,9 @@ export const start = (resume?: string, permissionMode?: PermissionMode) => {
 
 export const close = () => {
   clearStop()
+  codexTurn?.abort()
+  codexTurn = undefined
+  delegate.stopAll()
   inbox?.close()
   inbox = undefined
   session?.close()
@@ -329,7 +400,56 @@ export const submit = (text: string) => {
   push({ kind: 'user', text, images: prompt.images })
   for (const problem of prompt.problems) push({ kind: 'note', text: problem, tone: 'error' })
   setState({ busy: true, mood: 'thinking', status: pick(mascot().verbs), turnStarted: Date.now(), turnTools: 0 })
-  inbox?.send(prompt.content)
+  // The first prompt after a switch carries the conversation so far.
+  const before = handoff
+  handoff = undefined
+  if (getState().provider === 'codex') sendCodex(before ? before + text : text, prompt.images)
+  else if (!before) inbox?.send(prompt.content)
+  else
+    inbox?.send(
+      typeof prompt.content === 'string' ? before + prompt.content : [{ type: 'text', text: before }, ...prompt.content],
+    )
+}
+
+// --- Handing the conversation across a switch ------------------------------
+
+// Claude Code and Codex can't read each other's conversations, so a switch
+// sends the new one what's on screen: prompts, replies and tool calls, newest
+// first to stay when it's long.
+const HANDOFF_CHARS = 8000
+let handoff: string | undefined
+
+const transcript = (entries: Entry[]) => {
+  const lines: string[] = []
+  let size = 0
+  for (const e of [...entries].reverse()) {
+    const line =
+      e.kind === 'user'
+        ? `User: ${e.text}`
+        : e.kind === 'assistant'
+          ? `Assistant: ${clip(e.text, 600)}`
+          : e.kind === 'tool'
+            ? `  (${e.name} ${e.detail}${e.status === 'error' ? ', failed' : ''})`
+            : undefined
+    if (!line) continue
+    if (size + line.length > HANDOFF_CHARS) break
+    lines.unshift(line)
+    size += line.length + 1
+  }
+  return lines.join('\n')
+}
+
+const handoffFrom = (entries: Entry[], from: string) => {
+  const earlier = transcript(entries)
+  if (!earlier) return undefined
+  return [
+    `This conversation started with ${from} in this folder. Here is what happened so far, for context; the user's new message follows it.`,
+    '<earlier-conversation>',
+    earlier,
+    '</earlier-conversation>',
+    '',
+    '',
+  ].join('\n')
 }
 
 // --- Stopping a reply ------------------------------------------------------
@@ -374,12 +494,18 @@ export const interrupt = () => {
   if (asking?.kind === 'permission') asking.resolve('no')
   setState({ status: 'Stopping' })
   stopTimer = setTimeout(forceStop, STOP_GRACE_MS)
-  session?.interrupt().catch(forceStop)
+  if (codexTurn) codexTurn.abort()
+  else session?.interrupt().catch(forceStop)
 }
 
-/** A fresh conversation, or an earlier one picked up where it left off. */
+/**
+ * A fresh conversation, or an earlier Claude Code one picked up where it left
+ * off; resuming one goes back to Claude.
+ */
 export const restart = async (resume?: string) => {
   const entries = resume ? await history(resume, summarize) : []
+  if (resume) setState({ provider: 'claude' })
+  handoff = undefined
   // Keep the mode the user picked; a new session would start in the default.
   const mode = getState().mode as PermissionMode
   close()
@@ -393,6 +519,7 @@ export const restart = async (resume?: string) => {
     status: resume ? 'Resumed' : 'Fresh start',
     agents: 0,
     contextPct: undefined,
+    usage: undefined,
     lastDiff: undefined,
     showDiff: false,
     pending: undefined,
@@ -448,8 +575,38 @@ export const restyle = () => {
 export { MODES }
 
 export const setMode = async (mode: PermissionMode) => {
-  await session?.setPermissionMode(mode)
+  // Codex picks its sandbox from the mode at the start of each turn.
+  if (getState().provider === 'claude') await session?.setPermissionMode(mode)
   setState({ mode })
+}
+
+/**
+ * Switches model. An OpenAI one ("codex" for Codex's default) moves to Codex,
+ * and a Claude one moves back; either move starts a fresh conversation.
+ * Returns false for a Claude model while on Claude, which /model handles itself.
+ */
+export const useModel = async (name: string): Promise<boolean> => {
+  const toCodex = codex.isCodexModel(name)
+  const from = getState().provider
+  if (!toCodex && from === 'claude') return false
+  if (toCodex) codexModel = name.toLowerCase() === 'codex' ? undefined : name
+  if (toCodex && from === 'codex') {
+    setState({ model: codexModel ? codex.modelName(codexModel) : 'Codex' })
+    push({ kind: 'note', text: `Codex now uses ${getState().model}.`, tone: 'dim' })
+    return true
+  }
+  const kept = getState().entries
+  setState({ provider: toCodex ? 'codex' : 'claude', model: '' })
+  await restart()
+  if (!toCodex) await session?.setModel(name).catch(() => push({ kind: 'note', text: `Claude Code doesn't know ${name}.`, tone: 'error' }))
+  refreshContext()
+  // The conversation stays on screen, and goes along with the next prompt.
+  handoff = handoffFrom(kept, from === 'codex' ? 'Codex' : 'Claude Code')
+  const now = !toCodex ? 'Back to Claude Code.' : codexModel ? `Now talking to ${getState().model} through Codex.` : 'Now talking to Codex.'
+  setState(s => ({
+    entries: [...kept, ...s.entries, { kind: 'note', text: handoff ? `${now} It gets the conversation so far with your next message.` : now, tone: 'dim' }],
+  }))
+  return true
 }
 
 /** Shift+Tab: the next permission mode, skipping any this account can't use. */

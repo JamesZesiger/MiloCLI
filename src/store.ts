@@ -38,10 +38,16 @@ export type Pending =
       resolve: (answers: Record<string, string>) => void
     }
 
+export type Provider = 'claude' | 'codex'
+
 export type State = {
   entries: Entry[]
+  /** Who answers: Claude Code, or OpenAI's models through Codex. */
+  provider: Provider
   model: string
   contextPct: number | undefined
+  /** Percent of the 5-hour plan limit on a subscription, or the session's cost. */
+  usage: string | undefined
   mode: string
   agents: number
   busy: boolean
@@ -62,8 +68,10 @@ export type State = {
 
 let state: State = {
   entries: [],
+  provider: 'claude',
   model: '',
   contextPct: undefined,
+  usage: undefined,
   mode: 'default',
   agents: 0,
   busy: false,
