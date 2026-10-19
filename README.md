@@ -94,6 +94,17 @@ Auto has full access. Claude Code's own commands, subagents and questions
 aren't there with Codex, and Ctrl+O shows a file's change since the last
 commit. Plain mode always uses Claude.
 
+### Codex agents for Claude
+
+While you talk to Claude, Milo gives it a `Codex agent` tool, so you can say
+"have a Codex agent on gpt-6-astra fix the failing test". Claude writes the
+agent a brief, Milo asks you before it starts (like any tool), and the agent
+works in the folder on your ChatGPT plan. Claude gets back the agent's report,
+the commands it ran and the files it changed, plus a thread id it can pass back
+to send the same agent round again for fixes or follow-ups. The header counts
+it as an agent while it runs, and the status line shows its current command.
+It's read-only in Plan mode, or whenever Claude asks for a review only.
+
 ### Keys
 
 | Key            | What it does                                                    |

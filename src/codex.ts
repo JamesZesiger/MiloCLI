@@ -139,6 +139,11 @@ const tool = (id: string, name: string, detail: string, status: 'running' | 'don
     }
   })
 
+// Codex wraps each command in /bin/bash -lc '…'; this is just the command.
+export const commandText = (command: string) =>
+  command.replace(/^\S*\/(?:ba|z)?sh -lc '([\s\S]*)'$/, '$1').replaceAll(`'\\''`, `'`)
+
+/** Puts what Codex is doing in the log, as if Claude were doing it. */
 const show = (item: ThreadItem, done: boolean) => {
   switch (item.type) {
     case 'agent_message':
@@ -147,9 +152,7 @@ const show = (item: ThreadItem, done: boolean) => {
     case 'command_execution': {
       const failed = item.status === 'failed' || (item.exit_code ?? 0) !== 0
       const output = item.aggregated_output.trim().split('\n').slice(-5).join('\n')
-      // Codex wraps each command in /bin/bash -lc '…'; show just the command.
-      const command = item.command.replace(/^\S*\/(?:ba|z)?sh -lc '([\s\S]*)'$/, '$1').replaceAll(`'\\''`, `'`)
-      tool(item.id, 'Bash', clip(command),!done ? 'running' : failed ? 'error' : 'done', failed && done ? output : undefined)
+      tool(item.id, 'Bash', clip(commandText(item.command)), !done ? 'running' : failed ? 'error' : 'done', failed && done ? output : undefined)
       if (done) setState({ mood: 'thinking', currentTool: undefined })
       return
     }
@@ -175,21 +178,28 @@ const show = (item: ThreadItem, done: boolean) => {
 
 export type TurnEnd = { ok: true } | { ok: false; stopped: boolean; error?: string }
 
-/** Sends one prompt to Codex and shows what it does until the turn ends. */
+/**
+ * Sends one prompt to Codex and shows what it does until the turn ends. An
+ * agent working for Claude passes its own instructions, sandbox and `show`.
+ */
 export const run = async (options: {
   threadId?: string
   model?: string
   mode: string
+  sandbox?: SandboxMode
+  instructions?: string
   text: string
   images: string[]
   signal: AbortSignal
   onThread: (id: string) => void
+  show?: (item: ThreadItem, done: boolean) => void
 }): Promise<TurnEnd> => {
-  const instructions = [persona(), options.mode === 'plan' ? PLAN : ''].filter(Boolean).join('\n\n')
+  const display = options.show ?? show
+  const instructions = [options.instructions ?? persona(), options.mode === 'plan' ? PLAN : ''].filter(Boolean).join('\n\n')
   const codex = new Codex({ config: { developer_instructions: instructions } })
   const threadOptions = {
     model: options.model,
-    sandboxMode: SANDBOX[options.mode] ?? 'workspace-write',
+    sandboxMode: options.sandbox ?? SANDBOX[options.mode] ?? 'workspace-write',
     approvalPolicy: 'never' as const,
     workingDirectory: process.cwd(),
     skipGitRepoCheck: true,
@@ -207,10 +217,10 @@ export const run = async (options: {
           break
         case 'item.started':
         case 'item.updated':
-          show(event.item, false)
+          display(event.item, false)
           break
         case 'item.completed':
-          show(event.item, true)
+          display(event.item, true)
           break
         case 'turn.completed':
           return { ok: true }
@@ -226,9 +236,10 @@ export const run = async (options: {
     return { ok: false, stopped: false, error: err instanceof Error ? err.message : String(err) }
   } finally {
     // Anything still running when the turn ended didn't finish.
-    setState(s => ({
-      entries: s.entries.map(e => (e.kind === 'tool' && e.status === 'running' ? { ...e, status: 'error' } : e)),
-      currentTool: undefined,
-    }))
+    if (!options.show)
+      setState(s => ({
+        entries: s.entries.map(e => (e.kind === 'tool' && e.status === 'running' ? { ...e, status: 'error' } : e)),
+        currentTool: undefined,
+      }))
   }
 }

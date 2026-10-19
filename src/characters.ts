@@ -32,7 +32,7 @@ const catFace = (mood: Mood) => [
 
 const catSmall = (mood: Mood) => `=^${EYES[mood].replace(' ', '')}^=`
 
-const COMPANY = `The company is written CU*Answers, with the asterisk. The core product is CBX (some say CU*BASE). The online banking software is It's Me 247.`
+export const COMPANY = `The company is written CU*Answers, with the asterisk. The core product is CBX (some say CU*BASE). The online banking software is It's Me 247.`
 
 export const CHARACTERS = {
   milo: {

@@ -11,6 +11,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import * as codex from './codex.js'
+import * as delegate from './delegate.js'
 import { commandNames, history, syntheticText } from './commands.js'
 import { withImages, type Content } from './images.js'
 import { mascot, persona } from './characters.js'
@@ -121,6 +122,8 @@ const appendText = (text: string) =>
 const updateTool = (id: string, patch: Partial<Extract<Entry, { kind: 'tool' }>>) =>
   setState(s => ({ entries: s.entries.map(e => (e.kind === 'tool' && e.id === id ? { ...e, ...patch } : e)) }))
 
+const toolName = (name: string) => (name === delegate.TOOL ? 'Codex agent' : name)
+
 // Subagents: Agent tool calls in flight plus background tasks.
 const agentCalls = new Set<string>()
 const tasks = new Set<string>()
@@ -158,7 +161,7 @@ const canUseTool: CanUseTool = (tool, input, { signal, suggestions, decisionReas
       lastDiff: diff ?? s.lastDiff,
       pending: {
         kind: 'permission',
-        tool,
+        tool: toolName(tool),
         detail: summarize(input),
         reason: decisionReason,
         diff,
@@ -166,7 +169,7 @@ const canUseTool: CanUseTool = (tool, input, { signal, suggestions, decisionReas
         resolve: (choice: Choice) => {
           setState({ pending: undefined, showDiff: false })
           if (choice === 'no') {
-            push({ kind: 'note', text: `Declined ${tool}`, tone: 'dim' })
+            push({ kind: 'note', text: `Declined ${toolName(tool)}`, tone: 'dim' })
             resolve({ behavior: 'deny', message: DECLINED })
           } else if (choice === 'always' && canAlways)
             resolve({ behavior: 'allow', updatedInput: input, updatedPermissions: suggestions })
@@ -242,15 +245,15 @@ const handle = (msg: SDKMessage) => {
       for (const block of msg.message.content) {
         if (block.type !== 'tool_use') continue
         const input = block.input as Record<string, unknown>
-        push({ kind: 'tool', id: block.id, name: block.name, detail: summarize(input), status: 'running' })
-        if (block.name === 'Agent' || block.name === 'Task') {
+        push({ kind: 'tool', id: block.id, name: toolName(block.name), detail: summarize(input), status: 'running' })
+        if (block.name === 'Agent' || block.name === 'Task' || block.name === delegate.TOOL) {
           agentCalls.add(block.id)
           countAgents()
         }
         const diff = diffFor(block.name, input)
         setState(s => ({
           mood: 'working',
-          currentTool: block.name,
+          currentTool: toolName(block.name),
           turnTools: s.turnTools + 1,
           status: pick(mascot().verbs),
           lastDiff: diff ?? s.lastDiff,
@@ -351,6 +354,7 @@ export const start = (resume?: string, permissionMode?: PermissionMode) => {
       includePartialMessages: true,
       systemPrompt: { type: 'preset', preset: 'claude_code', append: persona() },
       settingSources: ['user', 'project', 'local'],
+      mcpServers: { codex: delegate.server() },
       canUseTool,
     },
   })
@@ -378,6 +382,7 @@ export const close = () => {
   clearStop()
   codexTurn?.abort()
   codexTurn = undefined
+  delegate.stopAll()
   inbox?.close()
   inbox = undefined
   session?.close()
