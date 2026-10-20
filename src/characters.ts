@@ -32,8 +32,6 @@ const catFace = (mood: Mood) => [
 
 const catSmall = (mood: Mood) => `=^${EYES[mood].replace(' ', '')}^=`
 
-export const COMPANY = `The company is written CU*Answers, with the asterisk. The core product is CBX (some say CU*BASE). The online banking software is It's Me 247.`
-
 export const CHARACTERS = {
   milo: {
     name: 'Milo',
@@ -112,4 +110,4 @@ export const setCharacter = (name: CharacterName) => {
 }
 
 /** What goes on the end of Claude Code's system prompt for the current character. */
-export const persona = () => [mascot().voice, COMPANY].filter(Boolean).join('\n\n')
+export const persona = () => mascot().voice

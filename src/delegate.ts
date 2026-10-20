@@ -5,17 +5,14 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { relative } from 'node:path'
 import { z } from 'zod'
-import { COMPANY } from './characters.js'
 import * as codex from './codex.js'
 import { getState, setState } from './store.js'
 
 /** The tool's name as Claude Code knows it: mcp__<server>__<tool>. */
 export const TOOL = 'mcp__codex__agent'
 
-const INSTRUCTIONS = [
-  'Another agent, Claude, handed you this task inside Milo, a terminal app. Do it, then finish with a short report for Claude: what you found or changed, and anything left undone.',
-  COMPANY,
-].join('\n\n')
+const INSTRUCTIONS =
+  'Another agent, Claude, handed you this task inside Milo, a terminal app. Do it, then finish with a short report for Claude: what you found or changed, and anything left undone.'
 
 // Agents still working, so stopping or restarting Claude ends them too.
 const running = new Set<AbortController>()
