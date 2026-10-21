@@ -11,12 +11,12 @@ import { portrait, type Size } from './portrait.js'
 import { align } from './diff.js'
 import { logLines } from './render.js'
 import { highlight, isEmpty, selectedText, type Selection } from './select.js'
-import { characterCommand, completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
+import { ago, allSessions, characterCommand, completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
 import { pasteImage } from './images.js'
 import { treeRows, type Row } from './explorer.js'
 import { appendOutput, changeDir, completeCommand, loadCommands, runCommand, stopCommand } from './terminal.js'
 import { clickAt, column, editorKey, follow, insertText, isDirty, openDoc, reload, renderLine, save, type Doc } from './editor.js'
-import { getState, push, setState, useStore, type Diff, type State } from './store.js'
+import { activeKey, getSlots, getState, push, setState, useSlots, useStore, type Diff, type Slot, type State } from './store.js'
 import * as session from './session.js'
 import { codexModels } from './codex.js'
 import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
@@ -61,6 +61,7 @@ const HELP = [
   '  PgUp / PgDn    scroll the workspace or the diff (the mouse wheel works too)',
   '  Ctrl+O         show or hide the last file change',
   '  Ctrl+B         show or hide the file explorer',
+  '  Ctrl+T         show or hide the sessions list',
   '  Ctrl+V / Alt+V paste an image from the clipboard',
   '  Drag           select text in the workspace; letting go copies it',
   '  Shift+Enter    new line (Alt+Enter where the terminal sends Shift+Enter as Enter)',
@@ -72,6 +73,11 @@ const HELP = [
   '  → / ←          open or close a folder',
   '  Enter / click  open or close a folder, or open a file in the editor',
   '  Esc            back to the command line (click the explorer to return)',
+  c.bold('Sessions'),
+  '  ↑ ↓ / Enter    pick a session to show; a saved one opens beside the others',
+  '  n / x          start a new conversation here / close the picked one',
+  '  Del            delete the picked conversation for good (press twice)',
+  '  Esc            back to the prompt; the list stays, and Ctrl+T or a click returns to it',
   c.bold('Command line (while the explorer is open)'),
   '  Enter          run what you typed in your shell; output shows in the terminal pane',
   '  Ctrl+C         stop the running command (twice kills it)',
@@ -253,7 +259,21 @@ const copyToClipboard = (stdout: NodeJS.WritableStream, text: string) =>
 
 // --- Header ----------------------------------------------------------------
 
-const Header = ({ width, s }: { width: number; s: State }) => {
+/** One line on the sessions not on screen: how many, and what they're up to. */
+const othersLine = (slots: Slot[]) => {
+  const others = slots.filter(slot => slot.key !== activeKey()).map(slot => slot.state)
+  if (!others.length) return ''
+  const waiting = others.filter(o => o.pending).length
+  const working = others.filter(o => o.busy && !o.pending).length
+  const parts = [
+    `${others.length} other session${others.length === 1 ? '' : 's'}`,
+    ...(working ? [`${working} working`] : []),
+    ...(waiting ? [c.accent(`${waiting} waiting on you`)] : []),
+  ]
+  return `${parts.join(c.dim(' · '))}${c.dim(' · Ctrl+T')}`
+}
+
+const Header = ({ width, s, slots }: { width: number; s: State; slots: Slot[] }) => {
   const showArt = width >= 50
   const showRight = width >= 64
   const pct = s.contextPct === undefined ? '–' : `${s.contextPct}%`
@@ -262,7 +282,7 @@ const Header = ({ width, s }: { width: number; s: State }) => {
     c.bold(c.accent(mascot().name)),
     mascot().about,
     c.dim(shortPath(process.cwd(), Math.max(16, width - 50))),
-    '',
+    othersLine(slots),
     c.dim('/help for commands · Ctrl+C stops a reply'),
   ]
   const right = [
@@ -394,6 +414,73 @@ const Explorer = ({
           </Text>
         )
       })}
+    </Box>
+  )
+}
+
+// --- Sessions: the open ones and saved ones to pick up ---------------------
+
+/** A session to pick: one open in this Milo, or a saved Claude Code one. */
+type SessionItem = { kind: 'open'; key: string; state: State } | { kind: 'saved'; info: SDKSessionInfo }
+
+/** What a session is about: its first prompt, or the saved title. */
+const sessionTitle = (item: SessionItem) => {
+  if (item.kind === 'saved') return item.info.customTitle || item.info.summary || item.info.firstPrompt || '(untitled)'
+  const first = item.state.entries.find(e => e.kind === 'user')
+  return first?.kind === 'user' ? first.text : 'New conversation'
+}
+
+const folderOf = (cwd: string | undefined) => (cwd ? basename(cwd) || cwd : '?')
+
+/** The panel's lines; `item` is the index of the session a line belongs to, for clicks. */
+const sessionLines = (items: SessionItem[], picked: number, focused: boolean, frame: number) => {
+  const lines: { text: string; item?: number }[] = []
+  const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
+  items.forEach((item, i) => {
+    if (i === 0 && item.kind === 'open') lines.push({ text: c.dim('Open') })
+    if (item.kind === 'saved' && items[i - 1]?.kind !== 'saved') lines.push({ text: c.dim(lines.length ? ' ' : '') }, { text: c.dim('Saved') })
+    let mark: string
+    let detail: string
+    if (item.kind === 'open') {
+      const st = item.state
+      const shown = item.key === activeKey()
+      // Each working session's spinner is a little out of step with the others.
+      mark = st.pending ? c.bold(c.accent('◆')) : st.busy ? c.accent(FRAMES[(frame + i) % FRAMES.length]!) : shown ? c.focus('●') : c.dim('○')
+      const doing = st.pending ? c.accent('waiting on you') : st.busy ? `${st.status}…` : st.mood === 'error' ? c.error(st.status) : 'idle'
+      detail = `${folderOf(st.cwd)} · ${doing}${st.provider === 'codex' ? ' · Codex' : ''}`
+    } else {
+      mark = c.dim('↺')
+      detail = `${folderOf(item.info.cwd)} · ${ago(item.info.lastModified)}`
+    }
+    const title = flat(sessionTitle(item))
+    const head = `${mark} ${i === picked && focused ? c.inverse(title) : item.kind === 'open' && item.key === activeKey() ? c.bold(title) : title}`
+    lines.push({ text: head, item: i }, { text: `  ${c.dim(detail)}`, item: i })
+  })
+  return lines
+}
+
+const SessionsView = ({
+  width,
+  height,
+  lines,
+  top,
+  focused,
+}: {
+  width: number
+  height: number
+  lines: { text: string; item?: number }[]
+  top: number
+  focused: boolean
+}) => {
+  const keys = focused ? c.dim(' n new · x close · Del delete') : ''
+  return (
+    <Box borderStyle="round" borderColor={focused ? shade('focus') : undefined} width={width} height={height} flexDirection="column" paddingX={1} overflow="hidden">
+      <Text wrap="truncate">{`${c.bold('Sessions')}${keys}`}</Text>
+      {lines.slice(top, top + Math.max(1, height - 3)).map((line, i) => (
+        <Text key={top + i} wrap="truncate">
+          {line.text || ' '}
+        </Text>
+      ))}
     </Box>
   )
 }
@@ -601,6 +688,8 @@ const InputBox = ({ width, lines, mood }: { width: number; lines: string[]; mood
 
 export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const s = useStore()
+  const slots = useSlots()
+  const shownKey = activeKey()
   const { exit } = useApp()
   const { stdout } = useStdout()
   const [selection, setSelection] = useState<Selection>()
@@ -625,8 +714,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const [job, setJob] = useState<{ child: ChildProcess; stopping: boolean }>()
   const listed = useRef<SDKSessionInfo[]>([])
   const [explorerOpen, setExplorerOpen] = useState(false)
-  // Where keys go: the prompt, the explorer or the editor.
-  const [focus, setFocus] = useState<'input' | 'explorer' | 'editor'>('input')
+  const [sessionsOpen, setSessionsOpen] = useState(false)
+  const [saved, setSaved] = useState<SDKSessionInfo[]>([])
+  const [sessionPick, setSessionPick] = useState(0)
+  const [sessionTop, setSessionTop] = useState(0)
+  // Where keys go: the prompt, the explorer, the editor or the sessions list.
+  const [focus, setFocus] = useState<'input' | 'explorer' | 'editor' | 'sessions'>('input')
   const explorerFocused = focus === 'explorer'
   const [doc, setDoc] = useState<Doc>()
   const [openFolders, setOpenFolders] = useState<ReadonlySet<string>>(new Set())
@@ -635,14 +728,16 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const [treeVersion, setTreeVersion] = useState(0)
   const armed = useRef({ action: '', at: 0 })
 
+  // Any session working keeps the spinners turning, on screen or not.
+  const anyBusy = slots.some(slot => slot.state.busy)
   useEffect(() => {
-    if (!s.busy) return
+    if (!anyBusy) return
     const timer = setInterval(() => {
       setFrame(f => f + 1)
       setNow(Date.now())
     }, 120)
     return () => clearInterval(timer)
-  }, [s.busy])
+  }, [anyBusy])
 
   const names = useMemo(() => [...new Set([...MILO_COMMANDS, ...s.commands])], [s.commands])
   // With the explorer open, the input box is a command line.
@@ -665,7 +760,8 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const workspaceHeight = Math.max(4, rows - HEADER_HEIGHT - 1 - inputHeight)
   const diff = s.showDiff ? (s.pending?.kind === 'permission' && s.pending.diff) || s.lastDiff : undefined
   const page = Math.max(1, workspaceHeight - 3)
-  const explorerWidth = explorerOpen ? Math.min(40, Math.max(18, Math.floor(boxWidth / 4))) : 0
+  const sideWidth = sessionsOpen ? Math.min(48, Math.max(24, Math.floor(boxWidth / 3))) : 0
+  const explorerWidth = explorerOpen ? Math.min(40, Math.max(18, Math.floor(boxWidth / 4))) : sideWidth
   const mainWidth = boxWidth - explorerWidth
   const workspaceLeft = WORKSPACE_LEFT + explorerWidth
   const innerWidth = mainWidth - 4
@@ -699,9 +795,57 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const picked = Math.max(0, tree.findIndex(row => row.path === explorerPath))
   const treeTop = Math.min(explorerTop, Math.max(0, tree.length - treeHeight))
 
-  // A question or permission prompt needs the keyboard.
+  // Open sessions first, then saved ones that aren't open.
+  const sessionItems = useMemo((): SessionItem[] => {
+    const open = slots.map((slot): SessionItem => ({ kind: 'open', key: slot.key, state: slot.state }))
+    const ids = new Set(slots.map(slot => slot.state.sessionId))
+    return [...open, ...saved.filter(info => !ids.has(info.sessionId)).map((info): SessionItem => ({ kind: 'saved', info }))]
+  }, [slots, saved])
+  const sessionPicked = Math.max(0, Math.min(sessionPick, sessionItems.length - 1))
+  const sessionRows = useMemo(
+    () => (sessionsOpen ? sessionLines(sessionItems, sessionPicked, focus === 'sessions', frame) : []),
+    [sessionsOpen, sessionItems, sessionPicked, focus, frame],
+  )
+
+  // Showing another session: its folder, from the bottom of its conversation,
+  // and picked in the list.
   useEffect(() => {
-    if (s.pending) setFocus('input')
+    setSessionPick(Math.max(0, slots.findIndex(slot => slot.key === shownKey)))
+    setTermCwd(getState().cwd)
+    setExplorerTop(0)
+    setScroll(0)
+    setSelection(undefined)
+  }, [shownKey])
+
+  // A session off screen that starts waiting on you, or finishes, says so.
+  const offScreen = useRef(new Map<string, { busy: boolean; waiting: boolean }>())
+  useEffect(() => {
+    const before = offScreen.current
+    const after = new Map<string, { busy: boolean; waiting: boolean }>()
+    for (const slot of slots) {
+      if (slot.key === shownKey) continue
+      const now = { busy: slot.state.busy, waiting: !!slot.state.pending }
+      after.set(slot.key, now)
+      const was = before.get(slot.key)
+      if (!was) continue
+      const title = `"${sessionTitle({ kind: 'open', key: slot.key, state: slot.state }).replace(/\s+/g, ' ').slice(0, 30)}"`
+      if (now.waiting && !was.waiting) warn(`${title} is waiting on you · Ctrl+T`)
+      else if (was.busy && !now.busy) setNotice(`${title} finished · Ctrl+T`)
+    }
+    offScreen.current = after
+  }, [slots, shownKey])
+
+  // A question or permission prompt needs the keyboard; once it's answered,
+  // the sessions list gets it back if it had it.
+  const lentBy = useRef<typeof focus | undefined>(undefined)
+  useEffect(() => {
+    if (s.pending) {
+      if (focus !== 'input') lentBy.current = focus
+      setFocus('input')
+    } else if (lentBy.current) {
+      if (lentBy.current === 'sessions' && sessionsOpen) setFocus('sessions')
+      lentBy.current = undefined
+    }
   }, [s.pending])
 
   // Rewrapping moves every line, and a fresh conversation drops them.
@@ -772,6 +916,73 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     if (explorerOpen && dirty) warn(`${docName} isn't saved yet. Ctrl+B brings it back.`)
     else if (explorerOpen && job) setNotice('The command keeps running · Ctrl+B shows it again')
     else if (!explorerOpen && !doc) setNotice('↑↓ move · Enter opens · Esc to the command line')
+  }
+  const loadSaved = () =>
+    allSessions()
+      .then(setSaved)
+      .catch(() => {})
+  // Ctrl+T opens the list, takes the keyboard back to it, or closes it.
+  const toggleSessions = () => {
+    if (sessionsOpen && focus !== 'sessions') return setFocus('sessions')
+    if (sessionsOpen) {
+      setSessionsOpen(false)
+      setFocus('input')
+      return
+    }
+    if (explorerOpen) toggleExplorer()
+    void loadSaved()
+    setSessionsOpen(true)
+    setFocus('sessions')
+    chooseSession(slots.findIndex(slot => slot.key === shownKey))
+    setNotice('↑↓ move · Enter shows · n new · x close · Del delete · Esc to the prompt · Ctrl+T closes')
+  }
+  /** Picks a session, scrolling the list just enough to show it. */
+  const chooseSession = (index: number) => {
+    const i = Math.max(0, Math.min(sessionItems.length - 1, index))
+    setSessionPick(i)
+    // Each session takes two lines; the first one also shows the heading above it.
+    const at = sessionLines(sessionItems, i, true, 0).findIndex(line => line.item === i)
+    if (at < 0) return
+    setSessionTop(top => (at - 1 <= top ? Math.max(0, at - 1) : Math.max(top, at + 2 - treeHeight)))
+  }
+  const fail = (what: string) => (err: unknown) => note(`${what}: ${err instanceof Error ? err.message : String(err)}`, 'error')
+  /** An open session comes on screen; a saved one opens alongside the others. */
+  const showSession = (item: SessionItem | undefined) => {
+    if (!item) return
+    if (item.kind === 'open') session.show(item.key)
+    else
+      session
+        .open(item.info.cwd ?? process.cwd(), item.info.sessionId)
+        .then(() => loadSaved())
+        .catch(fail("Couldn't open it"))
+  }
+  const newSession = () => session.open(getState().cwd).catch(fail("Couldn't start one"))
+  const closeSession = (item: SessionItem | undefined) => {
+    if (item?.kind !== 'open') return
+    if (slots.length < 2) return warn("That's the only session. /new starts a fresh conversation.")
+    if ((item.state.busy || item.state.pending) && !confirmed(`close ${item.key}`))
+      return warn('It is still working. Press x again to stop and close it.')
+    session.closeSession(item.key)
+    void loadSaved()
+  }
+  /** Deletes a conversation for good, on the second press of Del. */
+  const deleteSession = (item: SessionItem | undefined) => {
+    if (!item) return
+    const target =
+      item.kind === 'saved'
+        ? { sessionId: item.info.sessionId, dir: item.info.cwd }
+        : { key: item.key, sessionId: item.state.sessionId, dir: item.state.cwd }
+    const title = `"${sessionTitle(item).replace(/\s+/g, ' ').slice(0, 30)}"`
+    const working = item.kind === 'open' && (item.state.busy || !!item.state.pending)
+    if (!confirmed(`delete ${target.key ?? target.sessionId}`))
+      return warn(`Press Del again to delete ${title} for good${working ? ', stopping its work' : ''}.`)
+    session
+      .remove(target)
+      .then(() => {
+        void loadSaved()
+        setNotice(`Deleted ${title}`)
+      })
+      .catch(fail("Couldn't delete it"))
   }
   const openFile = (path: string) => {
     if (doc?.path === path) return setFocus('editor')
@@ -1024,17 +1235,29 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     y >= WORKSPACE_TOP && y < WORKSPACE_TOP + innerHeight && x >= workspaceLeft - 1 && x < workspaceLeft + innerWidth + 1
   // The editor's box takes the top of the workspace, the terminal's the rest.
   const inEditor = (x: number, y: number) => showEditor && inWorkspace(x, y) && y < WORKSPACE_TOP - 1 + editorBoxHeight - 1
+  const inSide = (x: number, y: number) =>
+    x >= EXPLORER_LEFT && x < EXPLORER_LEFT + explorerWidth && y >= WORKSPACE_TOP - 1 && y < WORKSPACE_TOP - 1 + workspaceHeight
+  const inSessions = (x: number, y: number) => sessionsOpen && inSide(x, y)
   const inExplorer = (x: number, y: number) =>
     explorerOpen && x >= EXPLORER_LEFT && x < EXPLORER_LEFT + explorerWidth && y >= WORKSPACE_TOP - 1 && y < WORKSPACE_TOP - 1 + workspaceHeight
 
   useMouse(event => {
     if (event.kind === 'wheel') {
       const delta = event.direction * WHEEL_LINES
-      if (inExplorer(event.x, event.y)) setExplorerTop(Math.max(0, Math.min(tree.length - treeHeight, treeTop + delta)))
+      if (inSessions(event.x, event.y)) setSessionTop(Math.max(0, Math.min(sessionRows.length - treeHeight, sessionTop + delta)))
+      else if (inExplorer(event.x, event.y)) setExplorerTop(Math.max(0, Math.min(tree.length - treeHeight, treeTop + delta)))
       else if (inEditor(event.x, event.y)) setDoc(d => d && { ...d, top: Math.max(0, Math.min(d.lines.length - editorHeight, d.top + delta)) })
       else if (diff) setDiffScroll(v => Math.max(0, v + delta))
       else if (showTerminal) setTermScroll(v => Math.max(0, v - delta))
       else setScroll(v => Math.max(0, v - delta))
+      return
+    }
+    if (event.kind === 'press' && inSessions(event.x, event.y)) {
+      setFocus('sessions')
+      const index = sessionRows[sessionTop + event.y - TREE_TOP]?.item
+      if (event.y < TREE_TOP || index === undefined) return
+      setSessionPick(index)
+      showSession(sessionItems[index])
       return
     }
     if (event.kind === 'press' && inExplorer(event.x, event.y)) {
@@ -1102,10 +1325,15 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       }
       return
     }
-    if (key.ctrl && ch === 'b') return toggleExplorer()
+    if (key.ctrl && ch === 'b') {
+      if (sessionsOpen) setSessionsOpen(false)
+      return toggleExplorer()
+    }
+    if (key.ctrl && ch === 't') return toggleSessions()
     if ((key.pageUp || key.pageDown) && focus !== 'editor') {
       const delta = key.pageUp ? -page : page
       if (explorerFocused) moveTo(picked + (key.pageUp ? -treeHeight : treeHeight))
+      else if (focus === 'sessions') chooseSession(sessionPicked + (key.pageUp ? -1 : 1) * Math.max(1, Math.floor(treeHeight / 2)))
       else if (diff) setDiffScroll(v => Math.max(0, v + delta))
       else if (showTerminal) setTermScroll(v => Math.max(0, v - delta))
       else setScroll(v => Math.max(0, v - delta))
@@ -1126,6 +1354,20 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       if (next) return setDoc(follow(next, editorHeight, editorWidth))
       // Keep other keys from the prompt; Shift+Tab still switches mode.
       if (!(key.tab && key.shift)) return
+    }
+    if (focus === 'sessions') {
+      const item = sessionItems[sessionPicked]
+      if (key.escape) return setFocus('input')
+      if (key.upArrow) return chooseSession(sessionPicked - 1)
+      if (key.downArrow) return chooseSession(sessionPicked + 1)
+      if (key.home) return chooseSession(0)
+      if (key.end) return chooseSession(sessionItems.length - 1)
+      if (key.return || ch === ' ') return showSession(item)
+      if (ch === 'n') return newSession()
+      if (ch === 'x') return closeSession(item)
+      if (key.delete) return deleteSession(item)
+      // Keep other typing out of the hidden input; Shift+Tab and Ctrl keys still work.
+      if (!key.ctrl && !key.meta && !(key.tab && key.shift)) return
     }
     if (explorerFocused) {
       const row = tree[picked]
@@ -1214,9 +1456,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   return (
     <Box flexDirection="column" width={columns} height={rows}>
       <Box paddingX={1}>
-        <Header width={boxWidth} s={s} />
+        <Header width={boxWidth} s={s} slots={slots} />
       </Box>
       <Box paddingX={1}>
+        {sessionsOpen && (
+          <SessionsView width={explorerWidth} height={workspaceHeight} lines={sessionRows} top={sessionTop} focused={focus === 'sessions'} />
+        )}
         {explorerOpen && (
           <Explorer
             root={termCwd}
@@ -1275,10 +1520,13 @@ export const main = async () => {
   process.once('exit', () => process.stdout.write(MOUSE_OFF))
   const app = render(<Root />, { alternateScreen: true, exitOnCtrlC: false, maxFps: 30, kittyKeyboard: { mode: 'auto' } })
   await app.waitUntilExit()
-  session.close()
-  const { sessionId: id, provider } = getState()
-  if (id && provider === 'codex') console.log(c.dim(`Resume this conversation in Codex: codex resume ${id}`))
-  else if (id) console.log(c.dim(`Resume this conversation in Claude Code: claude --resume ${id}`))
+  session.closeAll()
+  for (const { state } of getSlots()) {
+    const { sessionId: id, provider, cwd } = state
+    const where = getSlots().length > 1 ? c.dim(` (${basename(cwd) || cwd})`) : ''
+    if (id && provider === 'codex') console.log(c.dim(`Resume this conversation in Codex: codex resume ${id}`) + where)
+    else if (id) console.log(c.dim(`Resume this conversation in Claude Code: claude --resume ${id}`) + where)
+  }
   console.log(c.dim('=^oo^= Bye!'))
   process.exit(0)
 }

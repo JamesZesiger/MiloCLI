@@ -92,7 +92,7 @@ export const syntheticText = (msg: SDKMessage): string | undefined => {
   return text || undefined
 }
 
-const ago = (ms: number) => {
+export const ago = (ms: number) => {
   const minutes = Math.round((Date.now() - ms) / 60000)
   if (minutes < 60) return `${minutes}m ago`
   if (minutes < 60 * 24) return `${Math.round(minutes / 60)}h ago`
@@ -106,6 +106,9 @@ const clip = (text: string, max: number) => {
 
 /** This folder's most recent conversations, newest first. */
 export const recentSessions = (limit = 10) => listSessions({ dir: process.cwd(), limit })
+
+/** The most recent conversations in every folder, newest first. */
+export const allSessions = (limit = 30) => listSessions({ limit })
 
 export const formatSessions = (sessions: SDKSessionInfo[]) =>
   sessions.length
@@ -129,9 +132,9 @@ export const pickSession = (arg: string, listed: SDKSessionInfo[]) => {
 type Block = { type: string; text?: string; name?: string; id?: string; input?: Record<string, unknown> }
 
 /** A saved conversation as log entries: what was said and which tools ran. */
-export const history = async (sessionId: string, summarize: (input: Record<string, unknown>) => string) => {
+export const history = async (sessionId: string, summarize: (input: Record<string, unknown>) => string, dir = process.cwd()) => {
   const entries: Entry[] = []
-  for (const msg of await getSessionMessages(sessionId, { dir: process.cwd() })) {
+  for (const msg of await getSessionMessages(sessionId, { dir })) {
     if (msg.parent_tool_use_id) continue
     const { content } = (msg.message ?? {}) as { content?: string | Block[] }
     const blocks: Block[] = typeof content === 'string' ? [{ type: 'text', text: content }] : (content ?? [])

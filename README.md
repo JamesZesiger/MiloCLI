@@ -150,9 +150,35 @@ say what to do without it.
 | PgUp / PgDn    | Scroll the workspace or the diff (the mouse wheel works too)    |
 | Ctrl+O         | Show or hide the last file change                               |
 | Ctrl+B         | Show or hide the file explorer                                  |
+| Ctrl+T         | Show or hide the sessions list                                  |
 | Drag           | Select text in the workspace; letting go copies it              |
 | Esc            | Stop a reply, or close the diff                                 |
 | Ctrl+C         | Stop a reply (twice forces it), clear the input, or leave (twice) |
+
+## Sessions
+
+Ctrl+T opens a list beside the conversation. It shows every session open in
+this Milo, followed by saved Claude Code conversations from every folder,
+newest first. Several sessions can work at once, each in its own folder.
+A working session's mark spins, ◆ means it's waiting on you, and the header
+counts the sessions you aren't looking at.
+
+- **↑ ↓ and Enter** (or a click): show an open session, or open a saved one
+  next to the others in its own folder.
+- **n**: start a new conversation in this folder.
+- **x**: close the picked session. Press it twice if the session is still
+  working.
+- **Del**: delete the picked conversation for good. Press Del once to ask,
+  and again to delete. An open session is closed first; if it's the only one,
+  a fresh conversation takes its place.
+- The list keeps the keyboard after you switch, so you can move between
+  sessions, until you close it with Ctrl+T.
+- **Esc**: go back to the prompt. The list stays open while you talk, and
+  Ctrl+T (or a click) takes the keyboard back to it.
+
+Milo, the explorer and the command line move into the folder of whichever
+session is on screen. When a session you aren't looking at finishes, or needs
+an answer, the status line tells you.
 
 ## File explorer, editor and command line
 

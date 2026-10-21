@@ -8,7 +8,7 @@ import { homedir } from 'node:os'
 import { join, relative } from 'node:path'
 import { mascot, persona } from './characters.js'
 import { pick } from './milo.js'
-import { push, setState, type Diff, type Entry } from './store.js'
+import type { Diff, Entry, SlotStore } from './store.js'
 
 const CODEX_HOME = process.env.CODEX_HOME || join(homedir(), '.codex')
 
@@ -120,12 +120,12 @@ const readIfSmall = (file: string) => {
 }
 
 /** Codex only says which files changed, so the change shown is since the last commit. */
-const diffSinceCommit = (file: string): Diff => {
-  const committed = spawnSync('git', ['show', `HEAD:./${relative(process.cwd(), file)}`], { encoding: 'utf8' })
+const diffSinceCommit = (file: string, cwd: string): Diff => {
+  const committed = spawnSync('git', ['show', `HEAD:./${relative(cwd, file)}`], { cwd, encoding: 'utf8' })
   return { file, before: committed.status === 0 ? committed.stdout : '', after: readIfSmall(file), start: 1 }
 }
 
-const tool = (id: string, name: string, detail: string, status: 'running' | 'done' | 'error', error?: string) =>
+const tool = ({ setState }: SlotStore, id: string, name: string, detail: string, status: 'running' | 'done' | 'error', error?: string) =>
   setState(s => {
     const entry: Entry = { kind: 'tool', id, name, detail, status, error }
     const at = s.entries.findIndex(e => e.kind === 'tool' && e.id === id)
@@ -143,8 +143,9 @@ const tool = (id: string, name: string, detail: string, status: 'running' | 'don
 export const commandText = (command: string) =>
   command.replace(/^\S*\/(?:ba|z)?sh -lc '([\s\S]*)'$/, '$1').replaceAll(`'\\''`, `'`)
 
-/** Puts what Codex is doing in the log, as if Claude were doing it. */
-const show = (item: ThreadItem, done: boolean) => {
+/** Puts what Codex is doing in a session's log, as if Claude were doing it. */
+const shower = (store: SlotStore, cwd: string) => (item: ThreadItem, done: boolean) => {
+  const { push, setState } = store
   switch (item.type) {
     case 'agent_message':
       if (done && item.text) push({ kind: 'assistant', text: item.text })
@@ -152,23 +153,23 @@ const show = (item: ThreadItem, done: boolean) => {
     case 'command_execution': {
       const failed = item.status === 'failed' || (item.exit_code ?? 0) !== 0
       const output = item.aggregated_output.trim().split('\n').slice(-5).join('\n')
-      tool(item.id, 'Bash', clip(commandText(item.command)), !done ? 'running' : failed ? 'error' : 'done', failed && done ? output : undefined)
+      tool(store, item.id, 'Bash', clip(commandText(item.command)), !done ? 'running' : failed ? 'error' : 'done', failed && done ? output : undefined)
       if (done) setState({ mood: 'thinking', currentTool: undefined })
       return
     }
     case 'file_change': {
       const files = item.changes.map(change => change.path)
-      tool(item.id, 'Edit', clip(files.map(f => relative(process.cwd(), f) || f).join(', ')), item.status === 'failed' ? 'error' : 'done')
+      tool(store, item.id, 'Edit', clip(files.map(f => relative(cwd, f) || f).join(', ')), item.status === 'failed' ? 'error' : 'done')
       const updated = item.changes.find(change => change.kind !== 'delete')
-      if (updated) setState({ lastDiff: diffSinceCommit(updated.path) })
+      if (updated) setState({ lastDiff: diffSinceCommit(updated.path, cwd) })
       setState({ mood: 'thinking', currentTool: undefined })
       return
     }
     case 'mcp_tool_call':
-      tool(item.id, `${item.server}.${item.tool}`, '', !done ? 'running' : item.status === 'failed' ? 'error' : 'done', item.error?.message)
+      tool(store, item.id, `${item.server}.${item.tool}`, '', !done ? 'running' : item.status === 'failed' ? 'error' : 'done', item.error?.message)
       return
     case 'web_search':
-      tool(item.id, 'WebSearch', clip(item.query), done ? 'done' : 'running')
+      tool(store, item.id, 'WebSearch', clip(item.query), done ? 'done' : 'running')
       return
     case 'error':
       push({ kind: 'note', text: item.message, tone: 'error' })
@@ -179,10 +180,13 @@ const show = (item: ThreadItem, done: boolean) => {
 export type TurnEnd = { ok: true } | { ok: false; stopped: boolean; error?: string }
 
 /**
- * Sends one prompt to Codex and shows what it does until the turn ends. An
- * agent working for Claude passes its own instructions, sandbox and `show`.
+ * Sends one prompt to Codex in `cwd` and shows what it does in `store`'s log
+ * until the turn ends. An agent working for Claude passes its own
+ * instructions, sandbox and `show` instead.
  */
 export const run = async (options: {
+  cwd: string
+  store?: SlotStore
   threadId?: string
   model?: string
   mode: string
@@ -194,14 +198,14 @@ export const run = async (options: {
   onThread: (id: string) => void
   show?: (item: ThreadItem, done: boolean) => void
 }): Promise<TurnEnd> => {
-  const display = options.show ?? show
+  const display = options.show ?? (options.store ? shower(options.store, options.cwd) : () => {})
   const instructions = [options.instructions ?? persona(), options.mode === 'plan' ? PLAN : ''].filter(Boolean).join('\n\n')
   const codex = new Codex({ config: { developer_instructions: instructions } })
   const threadOptions = {
     model: options.model,
     sandboxMode: options.sandbox ?? SANDBOX[options.mode] ?? 'workspace-write',
     approvalPolicy: 'never' as const,
-    workingDirectory: process.cwd(),
+    workingDirectory: options.cwd,
     skipGitRepoCheck: true,
   }
   const thread = options.threadId ? codex.resumeThread(options.threadId, threadOptions) : codex.startThread(threadOptions)
@@ -237,7 +241,7 @@ export const run = async (options: {
   } finally {
     // Anything still running when the turn ended didn't finish.
     if (!options.show)
-      setState(s => ({
+      options.store?.setState(s => ({
         entries: s.entries.map(e => (e.kind === 'tool' && e.status === 'running' ? { ...e, status: 'error' } : e)),
         currentTool: undefined,
       }))

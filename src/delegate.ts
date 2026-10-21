@@ -6,21 +6,13 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { relative } from 'node:path'
 import { z } from 'zod'
 import * as codex from './codex.js'
-import { getState, setState } from './store.js'
+import type { SlotStore } from './store.js'
 
 /** The tool's name as Claude Code knows it: mcp__<server>__<tool>. */
 export const TOOL = 'mcp__codex__agent'
 
 const INSTRUCTIONS =
   'Another agent, Claude, handed you this task inside Milo, a terminal app. Do it, then finish with a short report for Claude: what you found or changed, and anything left undone.'
-
-// Agents still working, so stopping or restarting Claude ends them too.
-const running = new Set<AbortController>()
-
-export const stopAll = () => {
-  for (const agent of running) agent.abort()
-  running.clear()
-}
 
 const describe = () => {
   const models = codex.codexModels().map(m => m.slug)
@@ -36,10 +28,17 @@ const describe = () => {
 /**
  * A fresh server for each Claude Code session: one can only be connected once.
  * Always loaded, not deferred behind tool search, so a skill can name the tool
- * and Claude can call it straight away.
+ * and Claude can call it straight away. Its agents work in the session's
+ * folder and mode; `stopAll` ends any still running, for when Claude stops.
  */
-export const server = () =>
-  createSdkMcpServer({
+export const server = (store: SlotStore) => {
+  // Agents still working, so stopping or restarting Claude ends them too.
+  const running = new Set<AbortController>()
+  const stopAll = () => {
+    for (const agent of running) agent.abort()
+    running.clear()
+  }
+  const config = createSdkMcpServer({
     name: 'codex',
     version: '1.0.0',
     alwaysLoad: true,
@@ -57,7 +56,7 @@ export const server = () =>
           const stop = new AbortController()
           ;(extra as { signal?: AbortSignal }).signal?.addEventListener('abort', () => stop.abort())
           running.add(stop)
-          const mode = getState().mode
+          const { mode, cwd } = store.getState()
           let threadId = thread_id
           let reply = ''
           const commands: string[] = []
@@ -65,6 +64,7 @@ export const server = () =>
           const problems: string[] = []
           const end = await codex
             .run({
+              cwd,
               threadId: thread_id,
               model,
               mode,
@@ -75,13 +75,13 @@ export const server = () =>
               signal: stop.signal,
               onThread: id => (threadId = id),
               show: (item, done) => {
-                if (item.type === 'command_execution' && !done && getState().busy)
-                  setState({ status: `Codex: ${codex.commandText(item.command).slice(0, 60)}` })
+                if (item.type === 'command_execution' && !done && store.getState().busy)
+                  store.setState({ status: `Codex: ${codex.commandText(item.command).slice(0, 60)}` })
                 if (!done) return
                 if (item.type === 'agent_message') reply = item.text
                 else if (item.type === 'command_execution')
                   commands.push(`${codex.commandText(item.command)}${item.exit_code ? ` (exit ${item.exit_code})` : ''}`)
-                else if (item.type === 'file_change') item.changes.forEach(change => files.add(relative(process.cwd(), change.path) || change.path))
+                else if (item.type === 'file_change') item.changes.forEach(change => files.add(relative(cwd, change.path) || change.path))
                 else if (item.type === 'error') problems.push(item.message)
               },
             })
@@ -101,3 +101,5 @@ export const server = () =>
       ),
     ],
   })
+  return { config, stopAll }
+}

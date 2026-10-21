@@ -1,5 +1,6 @@
-// The full-screen app's state: one plain object, replaced on every change,
-// that the session writes and the screen reads.
+// The full-screen app's state. Each open session (a slot) has one plain
+// object, replaced on every change, that its session writes; the screen shows
+// the active slot's and lists the rest.
 import { useSyncExternalStore } from 'react'
 import type { Mood } from './milo.js'
 
@@ -64,9 +65,11 @@ export type State = {
   sessionId: string | undefined
   /** Claude Code's command and skill names, for completing what's typed. */
   commands: string[]
+  /** The folder this session works in. */
+  cwd: string
 }
 
-let state: State = {
+const fresh = (cwd: string): State => ({
   entries: [],
   provider: 'claude',
   model: '',
@@ -86,16 +89,65 @@ let state: State = {
   pending: undefined,
   sessionId: undefined,
   commands: [],
-}
+  cwd,
+})
+
+// --- Slots: one per open session -------------------------------------------
+
+export type Slot = { key: string; state: State }
+
+// Replaced, not changed, on every update, so the screen can tell it moved.
+let slots: Slot[] = [{ key: 'first', state: fresh(process.cwd()) }]
+let active = 'first'
+let nextKey = 0
 
 const listeners = new Set<() => void>()
+const changed = () => listeners.forEach(listener => listener())
 
-export const getState = () => state
+const find = (key: string) => slots.find(slot => slot.key === key)
 
-export const setState = (patch: Partial<State> | ((s: State) => Partial<State>)) => {
-  state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }
-  listeners.forEach(listener => listener())
+/** A new slot working in `cwd`, not yet shown; returns its key. */
+export const addSlot = (cwd: string, patch: Partial<State> = {}) => {
+  const key = `slot-${++nextKey}`
+  slots = [...slots, { key, state: { ...fresh(cwd), ...patch } }]
+  changed()
+  return key
 }
+
+export const removeSlot = (key: string) => {
+  slots = slots.filter(slot => slot.key !== key)
+  if (active === key && slots[0]) active = slots[0].key
+  changed()
+}
+
+export const showSlot = (key: string) => {
+  if (!find(key) || active === key) return
+  active = key
+  changed()
+}
+
+export const activeKey = () => active
+export const getSlots = () => slots
+
+/** Reads and writes for one slot, whether or not it's the one on screen. */
+export const storeFor = (key: string) => {
+  const getState = () => find(key)?.state ?? fresh(process.cwd())
+  const setState = (patch: Partial<State> | ((s: State) => Partial<State>)) => {
+    const slot = find(key)
+    if (!slot) return // closed while a reply was still arriving
+    const state = { ...slot.state, ...(typeof patch === 'function' ? patch(slot.state) : patch) }
+    slots = slots.map(s => (s.key === key ? { key, state } : s))
+    changed()
+  }
+  const push = (entry: Entry) => setState(s => ({ entries: [...s.entries, entry] }))
+  return { getState, setState, push }
+}
+export type SlotStore = ReturnType<typeof storeFor>
+
+// The slot on screen.
+export const getState = () => find(active)!.state
+export const setState: SlotStore['setState'] = patch => storeFor(active).setState(patch)
+export const push = (entry: Entry) => storeFor(active).push(entry)
 
 const subscribe = (listener: () => void) => {
   listeners.add(listener)
@@ -103,5 +155,4 @@ const subscribe = (listener: () => void) => {
 }
 
 export const useStore = () => useSyncExternalStore(subscribe, getState)
-
-export const push = (entry: Entry) => setState(s => ({ entries: [...s.entries, entry] }))
+export const useSlots = () => useSyncExternalStore(subscribe, getSlots)
