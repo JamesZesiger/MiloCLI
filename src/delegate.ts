@@ -26,18 +26,23 @@ const describe = () => {
   const models = codex.codexModels().map(m => m.slug)
   return [
     "Hands a task to a Codex agent running one of OpenAI's models, on the user's ChatGPT plan. It works in the current folder with its own tools (shell, file edits) and reports back what it said, ran and changed.",
-    'Use it when the user asks for a Codex or OpenAI agent, or wants a second model to take a task or a second look.',
+    'Use it when the user or a skill asks for a Codex or OpenAI agent, or wants a second model to take a task or a second look.',
     models.length ? `Models: ${models.join(', ')}. Leave model out for Codex's default.` : "Leave model out for Codex's default.",
     'It returns a thread_id: pass it back to continue with the same agent, for follow-ups or fixes.',
     'Set read_only for research or review. In Plan mode it is always read-only.',
   ].join(' ')
 }
 
-/** A fresh server for each Claude Code session: one can only be connected once. */
+/**
+ * A fresh server for each Claude Code session: one can only be connected once.
+ * Always loaded, not deferred behind tool search, so a skill can name the tool
+ * and Claude can call it straight away.
+ */
 export const server = () =>
   createSdkMcpServer({
     name: 'codex',
     version: '1.0.0',
+    alwaysLoad: true,
     tools: [
       tool(
         'agent',

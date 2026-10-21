@@ -134,6 +134,14 @@ to send the same agent round again for fixes or follow-ups. The header counts
 it as an agent while it runs, and the status line shows its current command.
 It's read-only in Plan mode, or whenever Claude asks for a review only.
 
+The tool is always loaded, so skills can use it too. A skill that wants both
+providers names both tools in its steps, for example: start an `Agent` with
+`model: "opus"` and an `mcp__codex__agent` call with
+`model: "gpt-6-astra", read_only: true` in the same turn, giving both the same
+brief, and then have Claude check both reports against the code before it
+answers. Outside Milo the Codex tool doesn't exist, so a skill like this should
+say what to do without it.
+
 ### Keys
 
 | Key            | What it does                                                    |
