@@ -196,8 +196,10 @@ command line.
 A plain `cd` moves the explorer and Claude Code to the new folder, keeping the
 same conversation. If Claude is mid-reply, the move happens when the reply ends.
 
-Esc steps back from the editor to the explorer to the command line. Ctrl+B
-closes them and goes back to talking to Milo.
+Alt+1, Alt+2 and Alt+3 jump straight to the explorer, the editor and the
+command line, and a click works too. Esc steps back from the editor to the
+explorer to the command line. Ctrl+B closes them and goes back to talking to
+Milo.
 
 ## Settings
 

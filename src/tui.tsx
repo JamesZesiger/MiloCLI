@@ -73,6 +73,7 @@ const HELP = [
   '  → / ←          open or close a folder',
   '  Enter / click  open or close a folder, or open a file in the editor',
   '  Esc            back to the command line (click the explorer to return)',
+  '  Alt+1 / 2 / 3  jump to the explorer, the editor or the command line',
   c.bold('Sessions'),
   '  ↑ ↓ / Enter    pick a session to show; a saved one opens beside the others',
   '  n / x          start a new conversation here / close the picked one',
@@ -493,7 +494,7 @@ const EditorView = ({ width, height, doc, dirty, focused }: { width: number; hei
   const textWidth = Math.max(1, width - 4 - numWidth - 1)
   const file = relative(process.cwd(), doc.path) || doc.path
   const where = c.dim(`Ln ${doc.row + 1}, Col ${column(doc.lines[doc.row]!, doc.col) + 1}`)
-  const keys = c.dim(focused ? 'Ctrl+S save · Ctrl+W close · Esc files' : 'click to edit')
+  const keys = c.dim(focused ? 'Ctrl+S save · Ctrl+W close · Esc files' : 'Alt+2 or click to edit')
   const title = `${c.bold(shortPath(file, Math.max(10, width - 50)))}${dirty ? c.accent(' ●') : ''}  ${where}  ${keys}`
   return (
     <Panel label="Editor" width={width} height={height} focused={focused}>
@@ -542,7 +543,7 @@ const TerminalView = ({
   if (!lines.length)
     view = [
       c.dim('Commands typed below run in your shell, and their output shows here.'),
-      c.dim('cd changes folder · clear empties this · Ctrl+C stops a command · Ctrl+B goes back to Milo'),
+      c.dim('cd changes folder · clear empties this · Ctrl+C stops a command · Alt+1/2/3 switch panes · Ctrl+B back to Milo'),
     ]
   else if (offset > 0) view[view.length - 1] = c.dim(`── ${offset} more line${offset === 1 ? '' : 's'} below · PgDn ──`)
   const title = `${c.dim(shortPath(cwd, Math.max(10, width - 20)))}${running ? `  ${c.accent('running…')}` : ''}`
@@ -915,7 +916,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     setFocus(explorerOpen ? 'input' : doc ? 'editor' : 'explorer')
     if (explorerOpen && dirty) warn(`${docName} isn't saved yet. Ctrl+B brings it back.`)
     else if (explorerOpen && job) setNotice('The command keeps running · Ctrl+B shows it again')
-    else if (!explorerOpen && !doc) setNotice('↑↓ move · Enter opens · Esc to the command line')
+    else if (!explorerOpen && !doc) setNotice('↑↓ move · Enter opens · Alt+1 files · Alt+2 editor · Alt+3 command line')
   }
   const loadSaved = () =>
     allSessions()
@@ -1345,6 +1346,13 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       else if (k === 'a') asking.resolve('always')
       else if (k === 'n' || key.escape) asking.resolve('no')
       return
+    }
+    // Alt+1, 2 and 3 jump between the explorer, the editor and the command line.
+    const pane = key.meta && !key.ctrl ? /^\x1b?([123])$/.exec(ch)?.[1] : undefined
+    if (pane && shellMode) {
+      if (pane === '1') return setFocus('explorer')
+      if (pane === '3') return setFocus('input')
+      return doc ? setFocus('editor') : warn('No file open. Pick one in the explorer.')
     }
     if (focus === 'editor' && doc) {
       if (key.escape) return setFocus('explorer')
