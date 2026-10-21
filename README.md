@@ -74,6 +74,12 @@ Type a prompt and press Enter. Messages sent while Claude is busy wait their
 turn. Image files named in a prompt, typed or dragged in, are sent as pictures,
 and Ctrl+V or Alt+V pastes an image from the clipboard.
 
+As in Claude Code, a paste over 100 characters, an image or a link shows in the
+input as a short label, like `[Pasted text #1 +12 lines]`, `[Image #2]` or
+`[Link #3]`, and goes to Claude in full. Backspace removes a label all at once.
+Your prompts stand out in the workspace on their own background; a long one
+folds to two lines, and a click shows it in full or folds it again.
+
 While Claude works, an orange streak circles the workspace border. When Claude
 is waiting on you to approve something or answer a question, the whole border
 lights up.
@@ -152,6 +158,8 @@ say what to do without it.
 | Ctrl+B         | Show or hide the file explorer                                  |
 | Ctrl+T         | Show or hide the sessions list                                  |
 | Drag           | Select text in the workspace; letting go copies it              |
+| Click          | Show a long prompt of yours in full, or fold it again           |
+| ↑ ↓            | Move between the input's lines, then through earlier prompts    |
 | Esc            | Stop a reply, or close the diff                                 |
 | Ctrl+C         | Stop a reply (twice forces it), clear the input, or leave (twice) |
 

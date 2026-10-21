@@ -68,6 +68,17 @@ export const withImages = (text: string): Prompt => {
   return { content: blocks.length ? [...blocks, { type: 'text', text }] : text, images, problems }
 }
 
+/** The image file a paste names, when it's nothing but one path to an image, as a file dragged in is. */
+export const imageFile = (text: string): string | undefined => {
+  const words = [...text.trim().matchAll(WORDS)]
+  if (words.length !== 1) return undefined
+  const [, single, double, bare] = words[0]!
+  const word = single ?? double ?? bare!
+  if (!(extname(word).toLowerCase() in TYPES)) return undefined
+  const path = toPath(word)
+  return existsSync(path) ? path : undefined
+}
+
 // --- The clipboard ---------------------------------------------------------
 
 const run = promisify(execFile)

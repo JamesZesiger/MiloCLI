@@ -9,10 +9,10 @@ import { CHARACTER_NAMES, mascot } from './characters.js'
 import { c, type Mood } from './milo.js'
 import { portrait, type Size } from './portrait.js'
 import { align } from './diff.js'
-import { logLines } from './render.js'
+import { folds, logLines } from './render.js'
 import { highlight, isEmpty, selectedText, type Selection } from './select.js'
 import { ago, allSessions, characterCommand, completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
-import { pasteImage } from './images.js'
+import { imageFile, pasteImage } from './images.js'
 import { treeRows, type Row } from './explorer.js'
 import { appendOutput, changeDir, completeCommand, loadCommands, poshPrompt, runCommand, stopCommand, type LastRun } from './terminal.js'
 import { clickAt, column, editorKey, follow, insertText, isDirty, openDoc, reload, renderLine, save, type Doc } from './editor.js'
@@ -21,6 +21,7 @@ import * as session from './session.js'
 import { codexModels } from './codex.js'
 import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
 import { shade, THEME_NAMES } from './theme.js'
+import type { Entry } from './store.js'
 import type { SDKSessionInfo } from '@anthropic-ai/claude-agent-sdk'
 import type { ChildProcess } from 'node:child_process'
 
@@ -64,6 +65,8 @@ const HELP = [
   '  Ctrl+T         show or hide the sessions list',
   '  Ctrl+V / Alt+V paste an image from the clipboard',
   '  Drag           select text in the workspace; letting go copies it',
+  '  Click          show a long prompt of yours in full, or fold it again',
+  '  ↑ ↓            move between the input\'s lines, then through earlier prompts',
   '  Shift+Enter    new line (Alt+Enter where the terminal sends Shift+Enter as Enter)',
   '  Shift+Tab      switch permission mode',
   '  Esc            stop a reply, or close the diff',
@@ -92,6 +95,7 @@ const HELP = [
   '  Ctrl+← / →     move by word; Ctrl+Home / End go to the start or end',
   '  Esc            back to the explorer; Ctrl+B closes both and goes back to talking to Milo',
   'Image files named in a prompt (typed or dragged in) are sent as pictures.',
+  'Pastes over 100 characters, images and links show as [Pasted text #1], [Image #2] or [Link #3]; they go in full.',
   'Anything else, including Claude Code commands like /context, /compact and /usage, goes to Claude.',
   `Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`,
 ].join('\n')
@@ -705,6 +709,10 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const [frame, setFrame] = useState(0)
   const [now, setNow] = useState(Date.now())
   const history = useRef<string[]>([])
+  // What each paste label in the input stands for, kept so earlier prompts still expand.
+  const pastes = useRef(new Map<string, string>())
+  // Your long prompts shown in full rather than folded.
+  const [opened, setOpened] = useState<ReadonlySet<Entry>>(new Set())
   const historyAt = useRef(-1)
   // The command line keeps its own history and half-typed line.
   const shellHistory = useRef<string[]>([])
@@ -781,7 +789,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const workspaceLeft = WORKSPACE_LEFT + explorerWidth
   const innerWidth = mainWidth - 4
   const innerHeight = Math.max(1, workspaceHeight - 2)
-  const log = useMemo(() => logLines(s.entries, innerWidth), [s.entries, innerWidth])
+  const { lines: log, owners } = useMemo(() => logLines(s.entries, innerWidth, opened), [s.entries, innerWidth, opened])
   const offset = Math.min(scroll, Math.max(0, log.length - innerHeight))
   const first = Math.max(0, log.length - offset - innerHeight)
   const showEditor = shellMode && !diff && !!doc
@@ -885,18 +893,54 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     edit(text.slice(0, at) + added + text.slice(at), at + added.length)
   }
 
+  /** A short label for pasted content, which the input shows in its place until it's sent, as Claude Code does. */
+  const label = (kind: 'Pasted text' | 'Image' | 'Link', content: string) => {
+    const breaks = content.split('\n').length - 1
+    const name = `[${kind} #${pastes.current.size + 1}${breaks ? ` +${breaks} line${breaks === 1 ? '' : 's'}` : ''}]`
+    pastes.current.set(name, content)
+    return name
+  }
+  /** An image file's label; a path with spaces goes quoted so it's still found as one. */
+  const imageLabel = (path: string) => label('Image', /\s/.test(path) ? `"${path}"` : path)
+  /** The text with each paste label back to what it stands for. */
+  const expand = (text: string) => {
+    for (const [name, content] of pastes.current) text = text.replaceAll(name, () => content)
+    return text
+  }
+  /** The paste label that ends just before `at`, if one does. */
+  const labelBefore = (text: string, at: number) => {
+    const name = /\[(?:Pasted text|Image|Link) #\d+(?: \+\d+ lines?)?\]$/.exec(text.slice(0, at))?.[0]
+    return name && pastes.current.has(name) ? name : undefined
+  }
+  /** Puts pasted text at the cursor; long text, links and image files go in as labels, except on the command line. */
+  const pasteText = (text: string) => {
+    const clean = text.replace(/\r\n?/g, '\n')
+    const image = shellMode ? undefined : imageFile(clean)
+    const shown = shellMode
+      ? clean
+      : image
+        ? imageLabel(image)
+        : /^https?:\/\/\S+$/.test(clean.trim())
+          ? label('Link', clean.trim())
+          : clean.length > 100
+            ? label('Pasted text', clean)
+            : clean
+    if (image) return insert(shown)
+    const { input: now, cursor: at } = typing.current
+    edit(now.slice(0, at) + shown + now.slice(at), at + shown.length)
+  }
+
   /** Adds the clipboard's image at the cursor, or `fallback` (the pasted text) when there is none. */
   const pasteClipboardImage = (fallback = '') => {
     setNotice('Checking the clipboard…')
     void pasteImage().then(file => {
       // The clipboard takes a moment; insert uses where the cursor is now.
       if (file) {
-        insert(file)
+        insert(imageLabel(file))
         return setNotice('Image pasted')
       }
       if (!fallback) return setNotice('No image on the clipboard')
-      const { input: text, cursor: at } = typing.current
-      edit(text.slice(0, at) + fallback + text.slice(at), at + fallback.length)
+      pasteText(fallback)
       setNotice('')
     })
   }
@@ -1214,7 +1258,9 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   }
 
   const submit = () => {
-    const text = input.trim()
+    // History keeps the labels, which still expand when an earlier prompt comes back.
+    const typed = input.trim()
+    const text = expand(typed)
     const asking = s.pending
     if (asking?.kind === 'question') {
       const q = asking.questions[asking.index]!
@@ -1230,7 +1276,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       return
     }
     if (!text) return
-    ;(shellMode ? shellHistory : history).current.unshift(text)
+    ;(shellMode ? shellHistory : history).current.unshift(typed)
     historyAt.current = -1
     edit('', 0)
     if (shellMode) {
@@ -1304,7 +1350,18 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     setSelection(sel)
     if (event.kind !== 'release') return
     dragging.current = false
-    if (isEmpty(sel)) return setSelection(undefined)
+    if (isEmpty(sel)) {
+      setSelection(undefined)
+      // A click, not a drag, on a long prompt shows it in full or folds it again.
+      const entry = owners[sel.head.line]
+      if (entry && log[sel.head.line] && folds(entry, innerWidth))
+        setOpened(open => {
+          const next = new Set(open)
+          if (!next.delete(entry)) next.add(entry)
+          return next
+        })
+      return
+    }
     const text = selectedText(log, sel)
     copyToClipboard(stdout, text)
     const count = text.split('\n').length
@@ -1316,8 +1373,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     // Copying a picture in a browser or app often puts its link on the clipboard
     // too, and the terminal pastes that (or nothing) instead of the picture.
     if (!text.trim() || /^\s*https?:\/\/\S+\s*$/.test(text)) return pasteClipboardImage(text.trim())
-    const clean = text.replace(/\r\n?/g, '\n')
-    edit(input.slice(0, cursor) + clean + input.slice(cursor), cursor + clean.length)
+    pasteText(text)
   })
 
   useInput((ch, key) => {
@@ -1453,7 +1509,9 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     if (key.return) return submit()
     // Most terminals send Backspace as DEL, which Ink reports as delete.
     if (key.backspace || key.delete) {
-      if (cursor > 0) edit(input.slice(0, cursor - 1) + input.slice(cursor), cursor - 1)
+      // A paste label goes all at once.
+      const gone = labelBefore(input, cursor)?.length ?? 1
+      if (cursor > 0) edit(input.slice(0, cursor - gone) + input.slice(cursor), cursor - gone)
       return
     }
     if (key.leftArrow) return setCursor(Math.max(0, cursor - 1))
@@ -1462,17 +1520,31 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     if (key.end || (key.ctrl && ch === 'e')) return setCursor(input.length)
     if (key.ctrl && ch === 'u') return edit('', 0)
     if (key.upArrow || key.downArrow) {
+      // Up and down move between the input's lines first, keeping the column.
+      const start = input.lastIndexOf('\n', cursor - 1) + 1
+      const col = cursor - start
+      if (key.upArrow && start > 0) {
+        const above = input.lastIndexOf('\n', start - 2) + 1
+        return setCursor(Math.min(above + col, start - 1))
+      }
+      const end = input.indexOf('\n', cursor)
+      if (key.downArrow && end >= 0) {
+        const below = input.indexOf('\n', end + 1)
+        return setCursor(Math.min(end + 1 + col, below < 0 ? input.length : below))
+      }
       const past = (shellMode ? shellHistory : history).current
       const next = historyAt.current + (key.upArrow ? 1 : -1)
       if (next < -1 || next >= past.length) return
       historyAt.current = next
       const text = next === -1 ? '' : past[next]!
-      return edit(text, text.length)
+      // Coming up, the cursor lands on the first line, so the next Up goes further back.
+      const firstEnd = text.indexOf('\n')
+      return edit(text, key.upArrow && firstEnd >= 0 ? firstEnd : text.length)
     }
     if (ch && !key.ctrl && !key.meta && !key.tab) {
       // A paste the terminal didn't bracket arrives as one chunk with CRs.
-      const text = ch.replace(/\r\n?/g, '\n')
-      edit(input.slice(0, cursor) + text + input.slice(cursor), cursor + text.length)
+      if (ch.length > 1) return pasteText(ch)
+      edit(input.slice(0, cursor) + ch + input.slice(cursor), cursor + ch.length)
     }
   })
 
