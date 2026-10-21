@@ -191,7 +191,9 @@ command line.
   An open file reloads when Claude changes it, unless it has unsaved changes.
 - **Command line:** commands run in your shell, with output in the terminal
   pane. Tab completes commands and paths, ↑ and ↓ go through earlier commands,
-  and Ctrl+C stops a running command.
+  and Ctrl+C stops a running command. If the shell you start Milo from runs
+  oh-my-posh, the terminal pane shows your oh-my-posh prompt before each
+  command; the input line keeps the folder name and `$`.
 
 A plain `cd` moves the explorer and Claude Code to the new folder, keeping the
 same conversation. If Claude is mid-reply, the move happens when the reply ends.

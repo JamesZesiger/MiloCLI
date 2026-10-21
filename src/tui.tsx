@@ -14,7 +14,7 @@ import { highlight, isEmpty, selectedText, type Selection } from './select.js'
 import { ago, allSessions, characterCommand, completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
 import { pasteImage } from './images.js'
 import { treeRows, type Row } from './explorer.js'
-import { appendOutput, changeDir, completeCommand, loadCommands, runCommand, stopCommand } from './terminal.js'
+import { appendOutput, changeDir, completeCommand, loadCommands, poshPrompt, runCommand, stopCommand, type LastRun } from './terminal.js'
 import { clickAt, column, editorKey, follow, insertText, isDirty, openDoc, reload, renderLine, save, type Doc } from './editor.js'
 import { activeKey, getSlots, getState, push, setState, useSlots, useStore, type Diff, type Slot, type State } from './store.js'
 import * as session from './session.js'
@@ -712,6 +712,8 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const [termLines, setTermLines] = useState<string[]>([])
   const [termCwd, setTermCwd] = useState(process.cwd())
   const [termScroll, setTermScroll] = useState(0)
+  const [lastRun, setLastRun] = useState<LastRun>()
+  const [posh, setPosh] = useState<string>()
   const [job, setJob] = useState<{ child: ChildProcess; stopping: boolean }>()
   const listed = useRef<SDKSessionInfo[]>([])
   const [explorerOpen, setExplorerOpen] = useState(false)
@@ -754,7 +756,19 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   )
   const ghost =
     s.pending || cursor !== input.length ? '' : shellMode ? (shellCompletion?.ghost ?? '') : completion(input, names, OPTIONS)
-  const prompt = shellMode ? ` ${c.focus(basename(termCwd) || termCwd)} ${c.bold('$')} ` : ` ${c.bold('❯')} `
+  // The user's oh-my-posh prompt heads each command in the terminal pane when
+  // they have one, redrawn as the folder or last command changes.
+  useEffect(() => {
+    if (!shellMode) return
+    let current = true
+    void poshPrompt(termCwd, columns, lastRun).then(p => current && setPosh(p))
+    return () => {
+      current = false
+    }
+  }, [shellMode, termCwd, columns, lastRun])
+  const shellLabel = `${c.focus(basename(termCwd) || termCwd)} ${c.bold('$')}`
+  const echoLabel = posh ?? shellLabel
+  const prompt = shellMode ? ` ${shellLabel} ` : ` ${c.bold('❯')} `
   const boxWidth = Math.max(20, columns - 2)
   const lines = inputLines(s, input, cursor, boxWidth, ghost, prompt)
   const inputHeight = lines.length + 2
@@ -1003,7 +1017,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const runShell = (text: string) => {
     if (job) return warn('A command is still running. Ctrl+C stops it.')
     if (text === 'clear' || text === 'cls') return setTermLines([])
-    const echo = `${c.focus(basename(termCwd) || termCwd)} ${c.bold('$')} ${text}`
+    const echo = `${echoLabel} ${text}`
     const moved = changeDir(text, termCwd)
     if (moved) {
       setTermLines(l => [...l, echo, ...('problem' in moved ? [c.error(moved.problem)] : [])])
@@ -1023,6 +1037,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       chunk => setTermLines(l => appendOutput(l, chunk)),
       (code, signal) => {
         setJob(undefined)
+        setLastRun({ code: code ?? 130, ms: Date.now() - started })
         const time = seconds(Date.now() - started)
         const outcome = code === 0 ? c.ok(`✓ done in ${time}`) : signal ? c.accent(`stopped after ${time}`) : c.error(`✗ exit ${code} after ${time}`)
         setTermLines(l => [...(l.at(-1) === '' ? l.slice(0, -1) : l), outcome])
@@ -1429,7 +1444,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       if (!choices.length) return
       const names = choices.map(choice => choice.trimEnd().replace(/^.*\/(?=.)/, ''))
       const shown = names.slice(0, 200).join('  ') + (names.length > 200 ? c.dim(`  …and ${names.length - 200} more`) : '')
-      setTermLines(l => [...l, `${c.focus(basename(termCwd) || termCwd)} ${c.bold('$')} ${input}`, c.dim(shown)])
+      setTermLines(l => [...l, `${echoLabel} ${input}`, c.dim(shown)])
       setTermScroll(0)
       return
     }

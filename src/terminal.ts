@@ -1,6 +1,6 @@
 // The explorer view's command line: runs shell commands in the background and
 // gathers their output as lines for the terminal pane.
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { readdirSync, statSync, type Dirent } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -93,6 +93,33 @@ export const runCommand = (
   })
   child.on('close', finish)
   return child
+}
+
+// --- Oh My Posh ------------------------------------------------------------
+
+// Set by `oh-my-posh init` in the shell Milo started from; without it the
+// command line keeps its own prompt.
+const poshConfig = process.env.POSH_CONFIG || process.env.POSH_THEME
+let poshMissing = !poshConfig
+
+/** How the last command went, for the prompt's status and timing segments. */
+export type LastRun = { code: number; ms: number }
+
+/**
+ * The user's oh-my-posh prompt for `cwd`, colors kept, or undefined when
+ * oh-my-posh isn't installed or set up.
+ */
+export const poshPrompt = (cwd: string, width: number, last?: LastRun): Promise<string | undefined> => {
+  if (poshMissing) return Promise.resolve(undefined)
+  const args = ['print', 'primary', `--config=${poshConfig}`, `--pwd=${cwd}`, '--escape=false', `--terminal-width=${width}`]
+  args.push(...(last ? [`--status=${last.code}`, `--execution-time=${last.ms}`] : ['--no-status']))
+  return new Promise(done =>
+    execFile('oh-my-posh', args, { cwd, timeout: 2000 }, (err, stdout) => {
+      if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') poshMissing = true
+      const prompt = stdout.replace(ESCAPES, '').replace(CONTROLS, '').replaceAll('\r', '').trimEnd()
+      done(err || !prompt ? undefined : prompt)
+    }),
+  )
 }
 
 // --- Completion ------------------------------------------------------------
