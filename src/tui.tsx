@@ -83,6 +83,7 @@ const HELP = [
   '  ↑ ↓ / Enter    pick a session to show; a saved one opens beside the others',
   '  n / x          start a new conversation here / close the picked one',
   '  r / p          rename the picked conversation / pin it to the top, or unpin it',
+  '  /              filter the list as you type, by name, folder or prompt; Esc clears it',
   '  Del            delete the picked conversation for good (press twice)',
   '  Esc            back to the prompt; the list stays, and Ctrl+T or a click returns to it',
   c.bold('Command line (while the explorer is open)'),
@@ -428,6 +429,9 @@ const Explorer = ({
 
 // --- Sessions: the open ones and saved ones to pick up ---------------------
 
+/** What the sessions list is narrowed to, and whether keys are still typing it. */
+type SessionFilter = { query: string; typing: boolean }
+
 /** A session to pick: one open in this Milo, or a saved Claude Code one. */
 type SessionItem = { kind: 'open'; key: string; state: State } | { kind: 'saved'; info: SDKSessionInfo }
 
@@ -449,6 +453,18 @@ const pinnedFirst = (items: SessionItem[]) => {
 }
 
 const folderOf = (cwd: string | undefined) => (cwd ? basename(cwd) || cwd : '?')
+
+/** Whether a session has every word of `query` in its name, folder or prompts, in any case. */
+const matchesFilter = (item: SessionItem, query: string) => {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+  if (!words.length) return true
+  const about =
+    item.kind === 'saved'
+      ? [item.info.customTitle, item.info.summary, item.info.firstPrompt, item.info.cwd]
+      : [item.state.cwd, ...item.state.entries.map(e => (e.kind === 'user' ? e.text : ''))]
+  const text = [sessionTitle(item), ...about].filter(Boolean).join('\n').toLowerCase()
+  return words.every(word => text.includes(word))
+}
 
 /** The panel's lines; `item` is the index of the session a line belongs to, for clicks. */
 const sessionLines = (items: SessionItem[], picked: number, focused: boolean, frame: number) => {
@@ -483,18 +499,23 @@ const SessionsView = ({
   lines,
   top,
   focused,
+  filter,
 }: {
   width: number
   height: number
   lines: { text: string; item?: number }[]
   top: number
   focused: boolean
+  filter: SessionFilter | undefined
 }) => {
-  const keys = focused ? c.dim(' n new · r rename · p pin · x close · Del delete') : ''
+  const keys = !focused ? '' : filter?.typing ? c.dim(' Enter shows · Esc clears') : c.dim(' / filter · n new · r rename · p pin · x close · Del delete')
+  // The filter shows as typed, with a cursor while it's being typed.
+  const query = filter ? ` ${c.focus(`/${filter.query}`)}${filter.typing && focused ? c.inverse(' ') : ''}` : ''
+  const shown = lines.length || !filter ? lines : [{ text: c.dim('No sessions match.') }]
   return (
     <Box borderStyle="round" borderColor={focused ? shade('focus') : undefined} width={width} height={height} flexDirection="column" paddingX={1} overflow="hidden">
-      <Text wrap="truncate">{`${c.bold('Sessions')}${keys}`}</Text>
-      {lines.slice(top, top + Math.max(1, height - 3)).map((line, i) => (
+      <Text wrap="truncate">{`${c.bold('Sessions')}${query}${keys}`}</Text>
+      {shown.slice(top, top + Math.max(1, height - 3)).map((line, i) => (
         <Text key={top + i} wrap="truncate">
           {line.text || ' '}
         </Text>
@@ -744,6 +765,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const [sessionTop, setSessionTop] = useState(0)
   // Pins and names live in marks.js; this moves on when they change, to redraw.
   const [marksVersion, setMarksVersion] = useState(0)
+  const [sessionFilter, setSessionFilter] = useState<SessionFilter>()
   // Ctrl+R searching earlier prompts: what's typed, the match shown, and the input to go back to.
   const [search, setSearch] = useState<{ query: string; at: number; found: boolean; input: string; cursor: number }>()
   // Naming a session borrows the input box, keeping what was half typed there.
@@ -858,8 +880,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     const ids = new Set(slots.map(slot => slot.state.sessionId))
     return [...open, ...saved.filter(info => !ids.has(info.sessionId)).map((info): SessionItem => ({ kind: 'saved', info }))]
   }, [slots, saved])
-  const sessionItems = useMemo(() => pinnedFirst(unsorted), [unsorted, marksVersion])
+  /** The list as it shows: pinned first, narrowed by the filter. */
+  const arrange = (items: SessionItem[]) => pinnedFirst(items).filter(item => matchesFilter(item, sessionFilter?.query ?? ''))
+  const sessionItems = useMemo(() => arrange(unsorted), [unsorted, marksVersion, sessionFilter?.query])
   const sessionPicked = Math.max(0, Math.min(sessionPick, sessionItems.length - 1))
+  /** Where the session on screen is in the list, which pins and the filter rearrange. */
+  const shownIndex = () => sessionItems.findIndex(item => item.kind === 'open' && item.key === activeKey())
   const sessionRows = useMemo(
     () => (sessionsOpen ? sessionLines(sessionItems, sessionPicked, focus === 'sessions', frame) : []),
     [sessionsOpen, sessionItems, sessionPicked, focus, frame],
@@ -868,7 +894,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   // Showing another session: its folder, from the bottom of its conversation,
   // and picked in the list.
   useEffect(() => {
-    setSessionPick(Math.max(0, slots.findIndex(slot => slot.key === shownKey)))
+    setSessionPick(Math.max(0, shownIndex()))
     setTermCwd(getState().cwd)
     setExplorerTop(0)
     setScroll(0)
@@ -1011,8 +1037,9 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     else if (explorerOpen && job) setNotice('The command keeps running · Ctrl+B shows it again')
     else if (!explorerOpen && !doc) setNotice('↑↓ move · Enter opens · Alt+1 files · Alt+2 editor · Alt+3 command line')
   }
-  const loadSaved = () =>
-    allSessions(30, pinnedIds())
+  // Filtering looks further back than the list usually shows.
+  const loadSaved = (limit = sessionFilter ? 200 : 30) =>
+    allSessions(limit, pinnedIds())
       .then(setSaved)
       .catch(() => {})
   // Ctrl+T opens the list, takes the keyboard back to it, or closes it.
@@ -1020,6 +1047,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     if (sessionsOpen && focus !== 'sessions') return setFocus('sessions')
     if (sessionsOpen) {
       setSessionsOpen(false)
+      setSessionFilter(undefined)
       setFocus('input')
       return
     }
@@ -1027,8 +1055,8 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     void loadSaved()
     setSessionsOpen(true)
     setFocus('sessions')
-    chooseSession(slots.findIndex(slot => slot.key === shownKey))
-    setNotice('↑↓ move · Enter shows · n new · r rename · p pin · x close · Del delete · Esc to the prompt · Ctrl+T closes')
+    chooseSession(shownIndex())
+    setNotice('↑↓ move · Enter shows · / filter · n new · r rename · p pin · x close · Del delete · Esc to the prompt · Ctrl+T closes')
   }
   /** Picks a session, scrolling the list just enough to show it. */
   const chooseSession = (index: number) => {
@@ -1075,6 +1103,22 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     setNotice('')
     if (!keep) edit(search.input, search.cursor)
   }
+  /** Narrows the list to sessions matching `query`, picking the first. */
+  const filterSessions = (query: string) => {
+    if (!sessionFilter) void loadSaved(200)
+    setSessionFilter({ query, typing: true })
+    setSessionPick(0)
+    setSessionTop(0)
+  }
+  /** Shows the whole list again, keeping the picked session picked. */
+  const clearFilter = () => {
+    const item = sessionItems[sessionPicked]
+    setSessionFilter(undefined)
+    void loadSaved(30)
+    const all = pinnedFirst(unsorted)
+    setSessionPick(Math.max(0, item ? all.indexOf(item) : 0))
+    setSessionTop(0)
+  }
   /** Pins a conversation to the top of the list, or unpins it. */
   const pinSession = (item: SessionItem | undefined) => {
     if (!item) return
@@ -1086,7 +1130,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     setMarksVersion(v => v + 1)
     setNotice(pinning ? 'Pinned to the top' : 'Unpinned')
     // The session moves; it stays picked where it lands.
-    setSessionPick(pinnedFirst(unsorted).indexOf(item))
+    setSessionPick(arrange(unsorted).indexOf(item))
   }
   /** Starts naming a conversation in the input box. */
   const startRename = (item: SessionItem | undefined) => {
@@ -1507,7 +1551,10 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     if (renaming && key.ctrl && (ch === 'b' || ch === 't')) return warn('Finish the name first: Enter saves it, Esc cancels.')
     if (search && key.ctrl && (ch === 'b' || ch === 't')) endSearch(true)
     if (key.ctrl && ch === 'b') {
-      if (sessionsOpen) setSessionsOpen(false)
+      if (sessionsOpen) {
+        setSessionsOpen(false)
+        setSessionFilter(undefined)
+      }
       return toggleExplorer()
     }
     if (key.ctrl && ch === 't') return toggleSessions()
@@ -1545,7 +1592,19 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     }
     if (focus === 'sessions') {
       const item = sessionItems[sessionPicked]
-      if (key.escape) return setFocus('input')
+      // While the filter is being typed, letters go to it; arrows still move.
+      if (sessionFilter?.typing) {
+        const query = sessionFilter.query
+        if (key.escape) return clearFilter()
+        if (key.return) {
+          setSessionFilter({ query, typing: false })
+          return showSession(item)
+        }
+        if (key.backspace || key.delete) return query ? filterSessions(query.slice(0, -1)) : clearFilter()
+        if (ch && !key.ctrl && !key.meta && !key.tab) return filterSessions(query + ch.replace(/[\r\n]/g, ' '))
+      }
+      if (key.escape) return sessionFilter ? clearFilter() : setFocus('input')
+      if (ch === '/') return filterSessions(sessionFilter?.query ?? '')
       if (key.upArrow) return chooseSession(sessionPicked - 1)
       if (key.downArrow) return chooseSession(sessionPicked + 1)
       if (key.home) return chooseSession(0)
@@ -1686,7 +1745,14 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       </Box>
       <Box paddingX={1}>
         {sessionsOpen && (
-          <SessionsView width={explorerWidth} height={workspaceHeight} lines={sessionRows} top={sessionTop} focused={focus === 'sessions'} />
+          <SessionsView
+            width={explorerWidth}
+            height={workspaceHeight}
+            lines={sessionRows}
+            top={sessionTop}
+            focused={focus === 'sessions'}
+            filter={sessionFilter}
+          />
         )}
         {explorerOpen && (
           <Explorer

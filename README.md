@@ -186,6 +186,10 @@ counts the sessions you aren't looking at.
   prompt. Claude Code conversations keep the name in Claude Code too.
 - **p**: pin the picked conversation to the top of the list, or unpin it.
   Pinned ones stay listed however old they get.
+- **/**: filter the list. Type words to match against names, folders and
+  prompts, in any case; ↑ ↓ still move, Enter shows the picked one and keeps
+  the filter, and Esc clears it. Filtering looks back through the last 200
+  saved conversations, not just the 30 the list usually shows.
 - **Del**: delete the picked conversation for good. Press Del once to ask,
   and again to delete. An open session is closed first; if it's the only one,
   a fresh conversation takes its place.
