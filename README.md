@@ -72,7 +72,11 @@ when piped, or with `--plain`, it runs line by line.
 
 Type a prompt and press Enter. Messages sent while Claude is busy wait their
 turn. Image files named in a prompt, typed or dragged in, are sent as pictures,
-and Ctrl+V or Alt+V pastes an image from the clipboard.
+and Ctrl+V or Alt+V pastes an image from the clipboard. Type `@` and a path to
+send a file's contents with the prompt: Tab finishes the path from the
+session's folder, and Tab again lists the choices. Files over 256 KB go by name
+only, for Claude to read as it needs. (Codex gets the path and reads the file
+itself.)
 
 As in Claude Code, a paste over 100 characters, an image or a link shows in the
 input as a short label, like `[Pasted text #1 +12 lines]`, `[Image #2]` or
@@ -152,13 +156,14 @@ say what to do without it.
 
 | Key            | What it does                                                    |
 | -------------- | --------------------------------------------------------------- |
-| Tab            | Finish the command you're typing                                |
+| Tab            | Finish the command or `@file` you're typing                     |
+| Ctrl+R         | Search earlier prompts as you type; Ctrl+R again goes further back, Enter keeps the match, Esc cancels |
 | PgUp / PgDn    | Scroll the workspace or the diff (the mouse wheel works too)    |
 | Ctrl+O         | Show or hide the last file change                               |
 | Ctrl+B         | Show or hide the file explorer                                  |
 | Ctrl+T         | Show or hide the sessions list                                  |
 | Drag           | Select text in the workspace; letting go copies it              |
-| Click          | Show a long prompt of yours in full, or fold it again           |
+| Click          | Show a long prompt of yours in full, or fold it again. On a tool line, show the change it made, or open its file in the editor |
 | ↑ ↓            | Move between the input's lines, then through earlier prompts    |
 | Esc            | Stop a reply, or close the diff                                 |
 | Ctrl+C         | Stop a reply (twice forces it), clear the input, or leave (twice) |
@@ -176,6 +181,11 @@ counts the sessions you aren't looking at.
 - **n**: start a new conversation in this folder.
 - **x**: close the picked session. Press it twice if the session is still
   working.
+- **r**: rename the picked conversation. The input box shows its name to
+  edit; Enter saves it, Esc cancels, and an empty name goes back to the first
+  prompt. Claude Code conversations keep the name in Claude Code too.
+- **p**: pin the picked conversation to the top of the list, or unpin it.
+  Pinned ones stay listed however old they get.
 - **Del**: delete the picked conversation for good. Press Del once to ask,
   and again to delete. An open session is closed first; if it's the only one,
   a fresh conversation takes its place.
@@ -183,6 +193,8 @@ counts the sessions you aren't looking at.
   sessions, until you close it with Ctrl+T.
 - **Esc**: go back to the prompt. The list stays open while you talk, and
   Ctrl+T (or a click) takes the keyboard back to it.
+
+Pins and names are kept in `~/.milo/sessions.json`.
 
 Milo, the explorer and the command line move into the folder of whichever
 session is on screen. When a session you aren't looking at finishes, or needs

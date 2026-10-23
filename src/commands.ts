@@ -1,8 +1,10 @@
 // Claude Code commands that only work in its own interactive screen, rebuilt
 // for Milo from the Agent SDK, plus helpers both front ends share.
 import {
+  getSessionInfo,
   getSessionMessages,
   listSessions,
+  renameSession,
   type AccountInfo,
   type AgentInfo,
   type SDKMessage,
@@ -107,8 +109,16 @@ const clip = (text: string, max: number) => {
 /** This folder's most recent conversations, newest first. */
 export const recentSessions = (limit = 10) => listSessions({ dir: process.cwd(), limit })
 
-/** The most recent conversations in every folder, newest first. */
-export const allSessions = (limit = 30) => listSessions({ limit })
+/** The most recent conversations in every folder, newest first, then any of `also` that are older. */
+export const allSessions = async (limit = 30, also: readonly string[] = []) => {
+  const found = await listSessions({ limit })
+  const missing = also.filter(id => !found.some(f => f.sessionId === id))
+  const older = await Promise.all(missing.map(id => getSessionInfo(id).catch(() => undefined)))
+  return [...found, ...older.filter((info): info is SDKSessionInfo => !!info)]
+}
+
+/** Names a Claude Code conversation, as its own /rename does. */
+export const nameSession = (sessionId: string, title: string, dir?: string) => renameSession(sessionId, title, { dir })
 
 export const formatSessions = (sessions: SDKSessionInfo[]) =>
   sessions.length

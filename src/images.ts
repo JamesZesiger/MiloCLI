@@ -1,5 +1,6 @@
-// Images in a prompt: paths to image files (typed, dragged into the terminal,
-// or saved from the clipboard) go to Claude as pictures alongside the text.
+// Attachments in a prompt: paths to image files (typed, dragged into the
+// terminal, or saved from the clipboard) go to Claude as pictures alongside
+// the text, and files mentioned as @path go with their contents.
 import { execFile } from 'node:child_process'
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -19,6 +20,8 @@ const TYPES = {
 
 // The API turns away images over 5 MB once base64 encoded.
 const MAX_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4)
+// A mentioned file bigger than this is left for Claude to read in parts.
+const MAX_MENTION_BYTES = 256 * 1024
 
 const isWsl = !!process.env.WSL_DISTRO_NAME || existsSync('/proc/sys/fs/binfmt_misc/WSLInterop')
 
@@ -39,21 +42,51 @@ const toPath = (word: string) => {
 // Quoted paths, or runs of non-spaces where a backslash can escape a space.
 const WORDS = /'([^']+)'|"([^"]+)"|((?:\\ |\S)+)/g
 
-export type Prompt = { content: Content; images: string[]; problems: string[] }
+export type Prompt = { content: Content; images: string[]; files: string[]; problems: string[] }
 
-/** The prompt to send: the text, plus any image files it names. */
-export const withImages = (text: string): Prompt => {
+/** A file mentioned as @path, as text to send with the prompt; undefined for folders and missing files. */
+const mention = (word: string, path: string, problems: string[]) => {
+  try {
+    const info = statSync(path)
+    if (!info.isFile()) return undefined
+    if (info.size > MAX_MENTION_BYTES) {
+      problems.push(`${basename(path)} is over 256 KB, so Claude gets its name and reads it as needed.`)
+      return undefined
+    }
+    const text = readFileSync(path, 'utf8')
+    if (text.includes('\0')) {
+      problems.push(`${basename(path)} looks like a binary file, so it wasn't attached.`)
+      return undefined
+    }
+    return `Contents of ${word}:\n\n${text}`
+  } catch {
+    return undefined
+  }
+}
+
+/** The prompt to send: the text, plus any image files it names and files it mentions as @path. */
+export const withAttachments = (text: string): Prompt => {
   const images: string[] = []
+  const files: string[] = []
   const problems: string[] = []
   const blocks: Exclude<Content, string> = []
   const seen = new Set<string>()
   for (const [, single, double, bare] of text.matchAll(WORDS)) {
-    const word = (single ?? double ?? bare!).replace(/[.,;:!?)]+$/, '')
+    const raw = (single ?? double ?? bare!).replace(/[.,;:!?)]+$/, '')
+    const mentioned = raw.startsWith('@') && raw.length > 1
+    const word = mentioned ? raw.slice(1) : raw
     const type = TYPES[extname(word).toLowerCase() as keyof typeof TYPES]
-    if (!type) continue
+    if (!type && !mentioned) continue
     const path = toPath(word)
     if (seen.has(path) || !existsSync(path)) continue
     seen.add(path)
+    if (!type) {
+      const contents = mention(raw, path, problems)
+      if (contents === undefined) continue
+      blocks.push({ type: 'text', text: contents })
+      files.push(path)
+      continue
+    }
     try {
       if (statSync(path).size > MAX_BYTES) {
         problems.push(`${basename(path)} is over 5 MB, so it wasn't attached.`)
@@ -65,7 +98,7 @@ export const withImages = (text: string): Prompt => {
       problems.push(`Couldn't read ${basename(path)}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
-  return { content: blocks.length ? [...blocks, { type: 'text', text }] : text, images, problems }
+  return { content: blocks.length ? [...blocks, { type: 'text', text }] : text, images, files, problems }
 }
 
 /** The image file a paste names, when it's nothing but one path to an image, as a file dragged in is. */

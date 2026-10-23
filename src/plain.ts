@@ -19,7 +19,7 @@ import {
   themeCommand,
   syntheticText,
 } from './commands.js'
-import { withImages, type Content } from './images.js'
+import { withAttachments, type Content } from './images.js'
 import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
 import { THEME_NAMES } from './theme.js'
 
@@ -461,8 +461,9 @@ const main = async () => {
       continue
     }
 
-    const prompt = withImages(text)
+    const prompt = withAttachments(text)
     for (const image of prompt.images) line(c.dim(`  🖼  ${image}`))
+    for (const file of prompt.files) line(c.dim(`  📄 ${file}`))
     for (const problem of prompt.problems) line(c.error(`  ${problem}`))
     replyStarted = false
     turnStarted = Date.now()

@@ -219,3 +219,17 @@ export const completeCommand = (input: string, cwd: string, history: string[]): 
   if (!ghost) ghost = history.find(past => past.startsWith(input) && past !== input)?.slice(input.length) ?? ''
   return { ghost, choices: choices.length > 1 ? choices : [] }
 }
+
+/**
+ * Completes an @path mention being typed at the end of a prompt, from `cwd`.
+ * Undefined when the last word isn't a mention, so other completions can try.
+ */
+export const completeMention = (input: string, cwd: string): Completion | undefined => {
+  const start = wordStart(input)
+  const word = input.slice(start)
+  if (!word.startsWith('@')) return undefined
+  const path = word.slice(1)
+  const choices = completePath(path, cwd, false).sort((a, b) => a.localeCompare(b))
+  const common = choices.length ? commonPrefix(choices) : ''
+  return { ghost: common.length > path.length ? common.slice(path.length) : '', choices: choices.length > 1 ? choices : [] }
+}

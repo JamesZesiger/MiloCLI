@@ -16,7 +16,7 @@ import { settings } from './settings.js'
 import * as codex from './codex.js'
 import * as delegate from './delegate.js'
 import { commandNames, history, syntheticText } from './commands.js'
-import { withImages, type Content } from './images.js'
+import { withAttachments, type Content } from './images.js'
 import { mascot, persona } from './characters.js'
 import { pick } from './milo.js'
 import { MODES } from './settings.js'
@@ -297,12 +297,13 @@ const createSession = (key: string) => {
         for (const block of msg.message.content) {
           if (block.type !== 'tool_use') continue
           const input = block.input as Record<string, unknown>
-          push({ kind: 'tool', id: block.id, name: toolName(block.name), detail: summarize(input), status: 'running' })
+          const diff = diffFor(block.name, input)
+          const file = typeof input.file_path === 'string' ? input.file_path : undefined
+          push({ kind: 'tool', id: block.id, name: toolName(block.name), detail: summarize(input), status: 'running', file, diff })
           if (block.name === 'Agent' || block.name === 'Task' || block.name === delegate.TOOL) {
             agentCalls.add(block.id)
             countAgents()
           }
-          const diff = diffFor(block.name, input)
           setState(s => ({
             mood: 'working',
             currentTool: toolName(block.name),
@@ -452,8 +453,8 @@ const createSession = (key: string) => {
       push({ kind: 'note', text: `Queued: ${clip(text, 60)}`, tone: 'dim' })
       return
     }
-    const prompt = withImages(text)
-    push({ kind: 'user', text, images: prompt.images })
+    const prompt = withAttachments(text)
+    push({ kind: 'user', text, images: prompt.images, files: prompt.files })
     for (const problem of prompt.problems) push({ kind: 'note', text: problem, tone: 'error' })
     setState({ busy: true, mood: 'thinking', status: pick(mascot().verbs), turnStarted: Date.now(), turnTools: 0 })
     // The first prompt after a switch carries the conversation so far.

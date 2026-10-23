@@ -53,6 +53,7 @@ const linesFor = (entry: Entry, width: number, labelled: boolean, open: boolean)
         '',
         ...promptLines(entry.text, width, open),
         ...(entry.images ?? []).flatMap(image => wrap(c.dim(`  🖼  ${basename(image)}`), width)),
+        ...(entry.files ?? []).flatMap(file => wrap(c.dim(`  📄 ${basename(file)}`), width)),
       ]
     case 'assistant':
       return [...(labelled ? ['', c.bold(c.accent(mascot().name))] : []), ...wrap(markdown(entry.text.trim()), width)]

@@ -4,17 +4,18 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, render, useApp, useInput, usePaste, useStdin, useStdout, useWindowSize } from 'ink'
 import wrapAnsi from 'wrap-ansi'
 import stringWidth from 'string-width'
-import { basename, relative } from 'node:path'
+import { basename, relative, resolve } from 'node:path'
 import { CHARACTER_NAMES, mascot } from './characters.js'
 import { c, type Mood } from './milo.js'
 import { portrait, type Size } from './portrait.js'
 import { align } from './diff.js'
 import { folds, logLines } from './render.js'
 import { highlight, isEmpty, selectedText, type Selection } from './select.js'
-import { ago, allSessions, characterCommand, completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
+import { ago, allSessions, nameSession, characterCommand, completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
 import { imageFile, pasteImage } from './images.js'
+import { forget, isPinned, pinnedIds, setTitle, titleOf, togglePin } from './marks.js'
 import { treeRows, type Row } from './explorer.js'
-import { appendOutput, changeDir, completeCommand, loadCommands, poshPrompt, runCommand, stopCommand, type LastRun } from './terminal.js'
+import { appendOutput, changeDir, completeCommand, completeMention, loadCommands, poshPrompt, runCommand, stopCommand, type LastRun } from './terminal.js'
 import { clickAt, column, editorKey, follow, insertText, isDirty, openDoc, reload, renderLine, save, type Doc } from './editor.js'
 import { activeKey, getSlots, getState, push, setState, useSlots, useStore, type Diff, type Slot, type State } from './store.js'
 import * as session from './session.js'
@@ -58,14 +59,15 @@ const HELP = [
   '  /new           start a fresh conversation',
   '  /exit          leave',
   c.bold('Keys'),
-  '  Tab            finish the command you are typing',
+  '  Tab            finish the command you are typing, or an @file (Tab again lists the choices)',
+  '  Ctrl+R         search earlier prompts as you type; Ctrl+R again goes further back',
   '  PgUp / PgDn    scroll the workspace or the diff (the mouse wheel works too)',
   '  Ctrl+O         show or hide the last file change',
   '  Ctrl+B         show or hide the file explorer',
   '  Ctrl+T         show or hide the sessions list',
   '  Ctrl+V / Alt+V paste an image from the clipboard',
   '  Drag           select text in the workspace; letting go copies it',
-  '  Click          show a long prompt of yours in full, or fold it again',
+  '  Click          show a long prompt of yours in full, or fold it again; on a tool, show its change or open its file',
   '  ↑ ↓            move between the input\'s lines, then through earlier prompts',
   '  Shift+Enter    new line (Alt+Enter where the terminal sends Shift+Enter as Enter)',
   '  Shift+Tab      switch permission mode',
@@ -80,6 +82,7 @@ const HELP = [
   c.bold('Sessions'),
   '  ↑ ↓ / Enter    pick a session to show; a saved one opens beside the others',
   '  n / x          start a new conversation here / close the picked one',
+  '  r / p          rename the picked conversation / pin it to the top, or unpin it',
   '  Del            delete the picked conversation for good (press twice)',
   '  Esc            back to the prompt; the list stays, and Ctrl+T or a click returns to it',
   c.bold('Command line (while the explorer is open)'),
@@ -94,7 +97,7 @@ const HELP = [
   '  Ctrl+Z / Ctrl+Y undo / redo',
   '  Ctrl+← / →     move by word; Ctrl+Home / End go to the start or end',
   '  Esc            back to the explorer; Ctrl+B closes both and goes back to talking to Milo',
-  'Image files named in a prompt (typed or dragged in) are sent as pictures.',
+  'Image files named in a prompt (typed or dragged in) are sent as pictures, and @path sends a file\'s contents.',
   'Pastes over 100 characters, images and links show as [Pasted text #1], [Image #2] or [Link #3]; they go in full.',
   'Anything else, including Claude Code commands like /context, /compact and /usage, goes to Claude.',
   `Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`,
@@ -428,11 +431,21 @@ const Explorer = ({
 /** A session to pick: one open in this Milo, or a saved Claude Code one. */
 type SessionItem = { kind: 'open'; key: string; state: State } | { kind: 'saved'; info: SDKSessionInfo }
 
-/** What a session is about: its first prompt, or the saved title. */
+const sessionIdOf = (item: SessionItem) => (item.kind === 'saved' ? item.info.sessionId : item.state.sessionId)
+
+/** What a session is about: the name you gave it, its first prompt, or the saved title. */
 const sessionTitle = (item: SessionItem) => {
+  const named = titleOf(sessionIdOf(item))
+  if (named) return named
   if (item.kind === 'saved') return item.info.customTitle || item.info.summary || item.info.firstPrompt || '(untitled)'
   const first = item.state.entries.find(e => e.kind === 'user')
   return first?.kind === 'user' ? first.text : 'New conversation'
+}
+
+/** The pinned sessions first, keeping the order otherwise. */
+const pinnedFirst = (items: SessionItem[]) => {
+  const pinned = items.filter(item => isPinned(sessionIdOf(item)))
+  return [...pinned, ...items.filter(item => !pinned.includes(item))]
 }
 
 const folderOf = (cwd: string | undefined) => (cwd ? basename(cwd) || cwd : '?')
@@ -441,9 +454,9 @@ const folderOf = (cwd: string | undefined) => (cwd ? basename(cwd) || cwd : '?')
 const sessionLines = (items: SessionItem[], picked: number, focused: boolean, frame: number) => {
   const lines: { text: string; item?: number }[] = []
   const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
+  const group = (item: SessionItem) => (isPinned(sessionIdOf(item)) ? 'Pinned' : item.kind === 'open' ? 'Open' : 'Saved')
   items.forEach((item, i) => {
-    if (i === 0 && item.kind === 'open') lines.push({ text: c.dim('Open') })
-    if (item.kind === 'saved' && items[i - 1]?.kind !== 'saved') lines.push({ text: c.dim(lines.length ? ' ' : '') }, { text: c.dim('Saved') })
+    if (i === 0 || group(item) !== group(items[i - 1]!)) lines.push(...(lines.length ? [{ text: ' ' }] : []), { text: c.dim(group(item)) })
     let mark: string
     let detail: string
     if (item.kind === 'open') {
@@ -477,7 +490,7 @@ const SessionsView = ({
   top: number
   focused: boolean
 }) => {
-  const keys = focused ? c.dim(' n new · x close · Del delete') : ''
+  const keys = focused ? c.dim(' n new · r rename · p pin · x close · Del delete') : ''
   return (
     <Box borderStyle="round" borderColor={focused ? shade('focus') : undefined} width={width} height={height} flexDirection="column" paddingX={1} overflow="hidden">
       <Text wrap="truncate">{`${c.bold('Sessions')}${keys}`}</Text>
@@ -729,6 +742,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const [saved, setSaved] = useState<SDKSessionInfo[]>([])
   const [sessionPick, setSessionPick] = useState(0)
   const [sessionTop, setSessionTop] = useState(0)
+  // Pins and names live in marks.js; this moves on when they change, to redraw.
+  const [marksVersion, setMarksVersion] = useState(0)
+  // Ctrl+R searching earlier prompts: what's typed, the match shown, and the input to go back to.
+  const [search, setSearch] = useState<{ query: string; at: number; found: boolean; input: string; cursor: number }>()
+  // Naming a session borrows the input box, keeping what was half typed there.
+  const [renaming, setRenaming] = useState<{ item: SessionItem; input: string; cursor: number }>()
   // Where keys go: the prompt, the explorer, the editor or the sessions list.
   const [focus, setFocus] = useState<'input' | 'explorer' | 'editor' | 'sessions'>('input')
   const explorerFocused = focus === 'explorer'
@@ -762,8 +781,19 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     () => (shellMode && cursor === input.length ? completeCommand(input, termCwd, shellHistory.current) : undefined),
     [shellMode, input, cursor, termCwd, pathLoaded, treeVersion],
   )
+  // In a prompt, an @path being typed completes from the session's folder.
+  const mentionCompletion = useMemo(
+    () => (!shellMode && cursor === input.length ? completeMention(input, s.cwd) : undefined),
+    [shellMode, input, cursor, s.cwd, treeVersion],
+  )
   const ghost =
-    s.pending || cursor !== input.length ? '' : shellMode ? (shellCompletion?.ghost ?? '') : completion(input, names, OPTIONS)
+    s.pending || renaming || search || cursor !== input.length
+      ? ''
+      : shellMode
+        ? (shellCompletion?.ghost ?? '')
+        : mentionCompletion
+          ? mentionCompletion.ghost
+          : completion(input, names, OPTIONS)
   // The user's oh-my-posh prompt heads each command in the terminal pane when
   // they have one, redrawn as the folder or last command changes.
   useEffect(() => {
@@ -776,7 +806,11 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   }, [shellMode, termCwd, columns, lastRun])
   const shellLabel = `${c.focus(basename(termCwd) || termCwd)} ${c.bold('$')}`
   const echoLabel = posh ?? shellLabel
-  const prompt = shellMode ? ` ${shellLabel} ` : ` ${c.bold('❯')} `
+  const prompt = search
+    ? ` ${c.dim('search')} ${c.bold(search.query)}${search.found ? '' : c.error(' no match')} ${c.bold('❯')} `
+    : renaming
+      ? ` ${c.accent('Name')} ${c.bold('❯')} `
+      : shellMode ? ` ${shellLabel} ` : ` ${c.bold('❯')} `
   const boxWidth = Math.max(20, columns - 2)
   const lines = inputLines(s, input, cursor, boxWidth, ghost, prompt)
   const inputHeight = lines.length + 2
@@ -818,12 +852,13 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const picked = Math.max(0, tree.findIndex(row => row.path === explorerPath))
   const treeTop = Math.min(explorerTop, Math.max(0, tree.length - treeHeight))
 
-  // Open sessions first, then saved ones that aren't open.
-  const sessionItems = useMemo((): SessionItem[] => {
+  // Pinned sessions first, then open ones, then saved ones that aren't open.
+  const unsorted = useMemo((): SessionItem[] => {
     const open = slots.map((slot): SessionItem => ({ kind: 'open', key: slot.key, state: slot.state }))
     const ids = new Set(slots.map(slot => slot.state.sessionId))
     return [...open, ...saved.filter(info => !ids.has(info.sessionId)).map((info): SessionItem => ({ kind: 'saved', info }))]
   }, [slots, saved])
+  const sessionItems = useMemo(() => pinnedFirst(unsorted), [unsorted, marksVersion])
   const sessionPicked = Math.max(0, Math.min(sessionPick, sessionItems.length - 1))
   const sessionRows = useMemo(
     () => (sessionsOpen ? sessionLines(sessionItems, sessionPicked, focus === 'sessions', frame) : []),
@@ -977,7 +1012,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     else if (!explorerOpen && !doc) setNotice('↑↓ move · Enter opens · Alt+1 files · Alt+2 editor · Alt+3 command line')
   }
   const loadSaved = () =>
-    allSessions()
+    allSessions(30, pinnedIds())
       .then(setSaved)
       .catch(() => {})
   // Ctrl+T opens the list, takes the keyboard back to it, or closes it.
@@ -993,7 +1028,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     setSessionsOpen(true)
     setFocus('sessions')
     chooseSession(slots.findIndex(slot => slot.key === shownKey))
-    setNotice('↑↓ move · Enter shows · n new · x close · Del delete · Esc to the prompt · Ctrl+T closes')
+    setNotice('↑↓ move · Enter shows · n new · r rename · p pin · x close · Del delete · Esc to the prompt · Ctrl+T closes')
   }
   /** Picks a session, scrolling the list just enough to show it. */
   const chooseSession = (index: number) => {
@@ -1024,6 +1059,62 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     session.closeSession(item.key)
     void loadSaved()
   }
+  /** Shows the first earlier prompt from `from` back that has `query` in it, or says there's none. */
+  const findPrompt = (query: string, from: number) => {
+    if (!search) return
+    const past = (shellMode ? shellHistory : history).current
+    const at = query ? past.findIndex((text, i) => i >= from && text.includes(query)) : -1
+    if (at < 0) return setSearch({ ...search, query, found: !query })
+    setSearch({ ...search, query, at, found: true })
+    edit(past[at]!, past[at]!.indexOf(query))
+  }
+  /** Stops searching, keeping the match shown or going back to what was typed before. */
+  const endSearch = (keep: boolean) => {
+    if (!search) return
+    setSearch(undefined)
+    setNotice('')
+    if (!keep) edit(search.input, search.cursor)
+  }
+  /** Pins a conversation to the top of the list, or unpins it. */
+  const pinSession = (item: SessionItem | undefined) => {
+    if (!item) return
+    const id = sessionIdOf(item)
+    if (!id) return warn('Send a prompt first, so there is a conversation to pin.')
+    const pinning = !isPinned(id)
+    const problem = togglePin(id)
+    if (problem) return warn(problem)
+    setMarksVersion(v => v + 1)
+    setNotice(pinning ? 'Pinned to the top' : 'Unpinned')
+    // The session moves; it stays picked where it lands.
+    setSessionPick(pinnedFirst(unsorted).indexOf(item))
+  }
+  /** Starts naming a conversation in the input box. */
+  const startRename = (item: SessionItem | undefined) => {
+    if (!item) return
+    if (!sessionIdOf(item)) return warn('Send a prompt first, so there is a conversation to name.')
+    const title = sessionTitle(item).replace(/\s+/g, ' ').trim()
+    setRenaming({ item, input, cursor })
+    edit(title, title.length)
+    setFocus('input')
+    setNotice('Enter saves the name · Esc cancels · an empty name goes back to the first prompt')
+  }
+  /** Ends naming, saving `title` unless it was cancelled. */
+  const endRename = (title?: string) => {
+    if (!renaming) return
+    const { item, input: was, cursor: at } = renaming
+    setRenaming(undefined)
+    edit(was, at)
+    if (sessionsOpen) setFocus('sessions')
+    if (title === undefined) return setNotice('')
+    const id = sessionIdOf(item)!
+    const problem = setTitle(id, title)
+    if (problem) return warn(problem)
+    setMarksVersion(v => v + 1)
+    setNotice(title ? `Named "${title.slice(0, 40)}"` : 'Name cleared')
+    // Claude Code keeps the name too, so its own list and /resume show it. Codex threads aren't its to name.
+    const claude = item.kind === 'saved' || item.state.provider === 'claude'
+    if (claude && title) nameSession(id, title, item.kind === 'saved' ? item.info.cwd : item.state.cwd).catch(() => {})
+  }
   /** Deletes a conversation for good, on the second press of Del. */
   const deleteSession = (item: SessionItem | undefined) => {
     if (!item) return
@@ -1038,6 +1129,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     session
       .remove(target)
       .then(() => {
+        if (target.sessionId) forget(target.sessionId)
         void loadSaved()
         setNotice(`Deleted ${title}`)
       })
@@ -1096,6 +1188,17 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     if (dirty && !confirmed('close')) return warn(`${docName} isn't saved. Ctrl+W again drops the changes.`)
     setDoc(undefined)
     setFocus('explorer')
+  }
+  /** A click on a tool in the log: its change side by side, or else its file in the editor. */
+  const showTool = (entry: Extract<Entry, { kind: 'tool' }>) => {
+    if (entry.diff) {
+      setDiffScroll(0)
+      return setState({ lastDiff: entry.diff, showDiff: true })
+    }
+    if (!entry.file) return
+    const path = resolve(getState().cwd, entry.file)
+    if (!explorerOpen) toggleExplorer()
+    openFile(path)
   }
   /** Picks a row, scrolling the tree just enough to show it. */
   const moveTo = (index: number) => {
@@ -1258,6 +1361,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   }
 
   const submit = () => {
+    if (renaming) return endRename(input.replace(/\s+/g, ' ').trim())
     // History keeps the labels, which still expand when an earlier prompt comes back.
     const typed = input.trim()
     const text = expand(typed)
@@ -1354,6 +1458,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       setSelection(undefined)
       // A click, not a drag, on a long prompt shows it in full or folds it again.
       const entry = owners[sel.head.line]
+      if (entry?.kind === 'tool') return showTool(entry)
       if (entry && log[sel.head.line] && folds(entry, innerWidth))
         setOpened(open => {
           const next = new Set(open)
@@ -1380,6 +1485,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     const state = getState()
     const asking = state.pending
 
+    if (search && key.ctrl && ch === 'c') return endSearch(false)
     if (key.ctrl && ch === 'c') {
       if (shellMode && job) {
         stopCommand(job.child, job.stopping)
@@ -1397,6 +1503,9 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       }
       return
     }
+    // Both swap what the input box holds, so a name being typed would go astray.
+    if (renaming && key.ctrl && (ch === 'b' || ch === 't')) return warn('Finish the name first: Enter saves it, Esc cancels.')
+    if (search && key.ctrl && (ch === 'b' || ch === 't')) endSearch(true)
     if (key.ctrl && ch === 'b') {
       if (sessionsOpen) setSessionsOpen(false)
       return toggleExplorer()
@@ -1444,6 +1553,8 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       if (key.return || ch === ' ') return showSession(item)
       if (ch === 'n') return newSession()
       if (ch === 'x') return closeSession(item)
+      if (ch === 'r') return startRename(item)
+      if (ch === 'p') return pinSession(item)
       if (key.delete) return deleteSession(item)
       // Keep other typing out of the hidden input; Shift+Tab and Ctrl keys still work.
       if (!key.ctrl && !key.meta && !(key.tab && key.shift)) return
@@ -1476,10 +1587,24 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       // Keep other typing out of the hidden input; Shift+Tab and Ctrl keys still work.
       if (!key.ctrl && !key.meta && !(key.tab && key.shift)) return
     }
+    if (search) {
+      if (key.escape || (key.ctrl && ch === 'g')) return endSearch(false)
+      if (key.ctrl && ch === 'r') return findPrompt(search.query, search.at + 1)
+      if (key.backspace || key.delete) return findPrompt(search.query.slice(0, -1), 0)
+      if (ch && !key.ctrl && !key.meta && !key.tab && !key.return) return findPrompt(search.query + ch.replace(/[\r\n]/g, ' '), 0)
+      // Anything else keeps the match and goes on as usual; Enter just keeps it, to edit or send.
+      endSearch(true)
+      if (key.return) return
+    }
+    if (key.ctrl && ch === 'r' && focus === 'input' && !asking && !renaming) {
+      setSearch({ query: '', at: -1, found: true, input, cursor })
+      return setNotice('Type to search earlier prompts · Ctrl+R further back · Enter keeps it · Esc cancels')
+    }
     if (key.tab && key.shift) {
       void session.cycleMode()
       return
     }
+    if (key.escape && renaming) return endRename()
     if (key.escape) {
       if (state.showDiff) setState({ showDiff: false })
       else if (state.busy) session.interrupt()
@@ -1494,6 +1619,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       return
     }
     if (ghost && (key.tab || key.rightArrow)) return edit(input + ghost, input.length + ghost.length)
+    // Tab with nothing more to add to an @path lists what could come next.
+    if (!shellMode && key.tab && !key.shift && mentionCompletion) {
+      const names = mentionCompletion.choices.map(choice => choice.trimEnd().replace(/^.*\/(?=.)/, ''))
+      if (names.length) setNotice(names.slice(0, 20).join('  ') + (names.length > 20 ? `  …and ${names.length - 20} more` : ''))
+      return
+    }
     // Tab with nothing more to add lists what could come next, as shells do.
     if (shellMode && key.tab && !key.shift) {
       const choices = shellCompletion?.choices ?? []

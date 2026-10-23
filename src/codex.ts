@@ -125,9 +125,17 @@ const diffSinceCommit = (file: string, cwd: string): Diff => {
   return { file, before: committed.status === 0 ? committed.stdout : '', after: readIfSmall(file), start: 1 }
 }
 
-const tool = ({ setState }: SlotStore, id: string, name: string, detail: string, status: 'running' | 'done' | 'error', error?: string) =>
+const tool = (
+  { setState }: SlotStore,
+  id: string,
+  name: string,
+  detail: string,
+  status: 'running' | 'done' | 'error',
+  error?: string,
+  change?: { file: string; diff: Diff },
+) =>
   setState(s => {
-    const entry: Entry = { kind: 'tool', id, name, detail, status, error }
+    const entry: Entry = { kind: 'tool', id, name, detail, status, error, ...change }
     const at = s.entries.findIndex(e => e.kind === 'tool' && e.id === id)
     if (at >= 0) return { entries: s.entries.map((e, i) => (i === at ? entry : e)) }
     return {
@@ -159,9 +167,10 @@ const shower = (store: SlotStore, cwd: string) => (item: ThreadItem, done: boole
     }
     case 'file_change': {
       const files = item.changes.map(change => change.path)
-      tool(store, item.id, 'Edit', clip(files.map(f => relative(cwd, f) || f).join(', ')), item.status === 'failed' ? 'error' : 'done')
       const updated = item.changes.find(change => change.kind !== 'delete')
-      if (updated) setState({ lastDiff: diffSinceCommit(updated.path, cwd) })
+      const change = updated && { file: updated.path, diff: diffSinceCommit(updated.path, cwd) }
+      tool(store, item.id, 'Edit', clip(files.map(f => relative(cwd, f) || f).join(', ')), item.status === 'failed' ? 'error' : 'done', undefined, change)
+      if (change) setState({ lastDiff: change.diff })
       setState({ mood: 'thinking', currentTool: undefined })
       return
     }

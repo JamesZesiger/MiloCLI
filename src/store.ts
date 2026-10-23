@@ -5,9 +5,19 @@ import { useSyncExternalStore } from 'react'
 import type { Mood } from './milo.js'
 
 export type Entry =
-  | { kind: 'user'; text: string; images?: string[] }
+  | { kind: 'user'; text: string; images?: string[]; files?: string[] }
   | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; id: string; name: string; detail: string; status: 'running' | 'done' | 'error'; error?: string }
+  | {
+      kind: 'tool'
+      id: string
+      name: string
+      detail: string
+      status: 'running' | 'done' | 'error'
+      error?: string
+      /** The file the tool worked on, and the change it made, which a click on it shows. */
+      file?: string
+      diff?: Diff
+    }
   | { kind: 'note'; text: string; tone?: 'dim' | 'error' | 'raw' }
 
 /** A file change; `start` is the file's line number of the first line shown. */
