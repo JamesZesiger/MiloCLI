@@ -157,6 +157,7 @@ say what to do without it.
 | Key            | What it does                                                    |
 | -------------- | --------------------------------------------------------------- |
 | Tab            | Finish the command or `@file` you're typing                     |
+| Ctrl+Backspace | Delete the word before the cursor, in the input and the editor (Alt+Backspace and, in the input, Ctrl+W too) |
 | Ctrl+R         | Search earlier prompts as you type; Ctrl+R again goes further back, Enter keeps the match, Esc cancels |
 | PgUp / PgDn    | Scroll the workspace or the diff (the mouse wheel works too)    |
 | Ctrl+O         | Show or hide the last file change                               |

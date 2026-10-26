@@ -254,6 +254,14 @@ const backspace = (doc: Doc) => {
   return change(doc, { lines: replaceLines(doc.lines, doc.row - 1, 2, [above + line]), row: doc.row - 1, col: above.length })
 }
 
+/** Ctrl+Backspace: back over a word or run of symbols and the spaces after it, or to the line above at its start. */
+const backspaceWord = (doc: Doc) => {
+  if (doc.col === 0) return backspace(doc)
+  const line = doc.lines[doc.row]!
+  const from = doc.col - /(\w+|[^\w\s]+)?\s*$/.exec(line.slice(0, doc.col))![0].length
+  return change(doc, { lines: replaceLines(doc.lines, doc.row, 1, [line.slice(0, from) + line.slice(doc.col)]), row: doc.row, col: from })
+}
+
 const forwardDelete = (doc: Doc) => {
   const line = doc.lines[doc.row]!
   if (doc.col < line.length) {
@@ -278,8 +286,11 @@ const redo = (doc: Doc): Doc => {
   return { ...doc, ...next, goal: column(next.lines[next.row]!, next.col), undo: [...doc.undo, now], redo: doc.redo.slice(0, -1), typing: false }
 }
 
-/** The doc after a key, or undefined when the key isn't the editor's. `page` is the view's height. */
-export const editorKey = (doc: Doc, input: string, key: Key, page: number): Doc | undefined => {
+/**
+ * The doc after a key, or undefined when the key isn't the editor's. `page` is
+ * the view's height; `wordBack` is a Backspace the terminal sent as Ctrl+Backspace.
+ */
+export const editorKey = (doc: Doc, input: string, key: Key, page: number, wordBack = false): Doc | undefined => {
   if (key.ctrl && input === 'z') return undo(doc)
   if (key.ctrl && input === 'y') return redo(doc)
   if (key.upArrow) return vertical(doc, -1)
@@ -300,7 +311,7 @@ export const editorKey = (doc: Doc, input: string, key: Key, page: number): Doc 
   if (key.home) return key.ctrl ? moveTo(doc, 0, 0) : home(doc)
   if (key.end) return key.ctrl ? moveTo(doc, Infinity, Infinity) : moveTo(doc, doc.row, Infinity)
   if (key.return) return newline(doc)
-  if (key.backspace) return backspace(doc)
+  if (key.backspace) return wordBack || key.ctrl || key.meta ? backspaceWord(doc) : backspace(doc)
   if (key.delete) return forwardDelete(doc)
   if (key.tab && !key.shift) return insertText(doc, doc.indent)
   // A paste the terminal didn't bracket arrives as one chunk with CRs.

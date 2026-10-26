@@ -69,6 +69,7 @@ const HELP = [
   '  Drag           select text in the workspace; letting go copies it',
   '  Click          show a long prompt of yours in full, or fold it again; on a tool, show its change or open its file',
   '  ↑ ↓            move between the input\'s lines, then through earlier prompts',
+  '  Ctrl+Backspace delete the word before the cursor (Alt+Backspace and Ctrl+W too)',
   '  Shift+Enter    new line (Alt+Enter where the terminal sends Shift+Enter as Enter)',
   '  Shift+Tab      switch permission mode',
   '  Esc            stop a reply, or close the diff',
@@ -97,6 +98,7 @@ const HELP = [
   '  Ctrl+W         close the file (twice drops unsaved changes)',
   '  Ctrl+Z / Ctrl+Y undo / redo',
   '  Ctrl+← / →     move by word; Ctrl+Home / End go to the start or end',
+  '  Ctrl+Backspace delete the word before the cursor',
   '  Esc            back to the explorer; Ctrl+B closes both and goes back to talking to Milo',
   'Image files named in a prompt (typed or dragged in) are sent as pictures, and @path sends a file\'s contents.',
   'Pastes over 100 characters, images and links show as [Pasted text #1], [Image #2] or [Link #3]; they go in full.',
@@ -260,6 +262,29 @@ const useMouse = (onMouse: (event: Mouse) => void) => {
       stdout.write(MOUSE_OFF)
     }
   }, [stdin, stdout])
+}
+
+/**
+ * The last chunk read from the terminal, as it came. Ink reports Backspace
+ * (sent as DEL) and Ctrl+Backspace (sent as ^H by most terminals) alike, so
+ * only the raw key tells them apart.
+ */
+const useLastChunk = () => {
+  const { stdin } = useStdin()
+  const last = useRef('')
+  useEffect(() => {
+    const stream = stdin as NodeJS.ReadStream
+    const read = stream.read
+    stream.read = ((size?: number) => {
+      const chunk = read.call(stream, size)
+      if (chunk !== null) last.current = String(chunk)
+      return chunk
+    }) as typeof read
+    return () => {
+      stream.read = read
+    }
+  }, [stdin])
+  return last
 }
 
 /** Puts text on the clipboard with OSC 52, which works over SSH and WSL too. */
@@ -973,6 +998,14 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     const name = /\[(?:Pasted text|Image|Link) #\d+(?: \+\d+ lines?)?\]$/.exec(text.slice(0, at))?.[0]
     return name && pastes.current.has(name) ? name : undefined
   }
+  /** Where Ctrl+Backspace deletes back to: past a paste label, a word or run of symbols and the spaces after it, or a line break. */
+  const wordStartBefore = (text: string, at: number) => {
+    const spaces = /[^\S\n]*$/.exec(text.slice(0, at))![0].length
+    const name = labelBefore(text, at - spaces)
+    if (name) return at - spaces - name.length
+    const gone = /(\w+|[^\w\s]+)?[^\S\n]*$/.exec(text.slice(0, at))![0].length
+    return Math.max(0, at - (gone || 1))
+  }
   /** Puts pasted text at the cursor; long text, links and image files go in as labels, except on the command line. */
   const pasteText = (text: string) => {
     const clean = text.replace(/\r\n?/g, '\n')
@@ -1451,6 +1484,8 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const inExplorer = (x: number, y: number) =>
     explorerOpen && x >= EXPLORER_LEFT && x < EXPLORER_LEFT + explorerWidth && y >= WORKSPACE_TOP - 1 && y < WORKSPACE_TOP - 1 + workspaceHeight
 
+  const lastChunk = useLastChunk()
+
   useMouse(event => {
     if (event.kind === 'wheel') {
       const delta = event.direction * WHEEL_LINES
@@ -1528,6 +1563,8 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   useInput((ch, key) => {
     const state = getState()
     const asking = state.pending
+    // Ctrl+Backspace, or Alt+Backspace as in shells, deletes a word.
+    const wordBack = key.backspace && (key.ctrl || key.meta || lastChunk.current === '\b')
 
     if (search && key.ctrl && ch === 'c') return endSearch(false)
     if (key.ctrl && ch === 'c') {
@@ -1585,7 +1622,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
       if (key.escape) return setFocus('explorer')
       if (key.ctrl && ch === 's') return saveDoc(doc)
       if (key.ctrl && ch === 'w') return closeDoc()
-      const next = editorKey(doc, ch, key, editorHeight)
+      const next = editorKey(doc, ch, key, editorHeight, wordBack)
       if (next) return setDoc(follow(next, editorHeight, editorWidth))
       // Keep other keys from the prompt; Shift+Tab still switches mode.
       if (!(key.tab && key.shift)) return
@@ -1697,6 +1734,11 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     // Shift+Enter (kitty keyboard terminals) or Alt+Enter starts a new line.
     if (key.return && (key.shift || key.meta)) return edit(input.slice(0, cursor) + '\n' + input.slice(cursor), cursor + 1)
     if (key.return) return submit()
+    // Ctrl+W too, as in shells.
+    if (wordBack || (key.ctrl && ch === 'w')) {
+      const from = wordStartBefore(input, cursor)
+      return edit(input.slice(0, from) + input.slice(cursor), from)
+    }
     // Most terminals send Backspace as DEL, which Ink reports as delete.
     if (key.backspace || key.delete) {
       // A paste label goes all at once.
