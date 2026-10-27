@@ -208,7 +208,7 @@ an answer, the status line tells you.
 ## File explorer, editor and command line
 
 Ctrl+B opens the explorer beside the workspace, and the input box becomes a
-command line.
+command line, ready to type in.
 
 - **Explorer:** arrow keys or letters to move, → and ← to open and close
   folders, Enter or a click to open a file.

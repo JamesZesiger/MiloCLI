@@ -1094,10 +1094,11 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     edit(other.input, other.cursor)
     historyAt.current = -1
     setExplorerOpen(!explorerOpen)
-    setFocus(explorerOpen ? 'input' : doc ? 'editor' : 'explorer')
+    // Opening it starts on the command line; Alt+1 and Alt+2 reach the files and the editor.
+    setFocus('input')
     if (explorerOpen && dirty) warn(`${docName} isn't saved yet. Ctrl+B brings it back.`)
     else if (explorerOpen && job) setNotice('The command keeps running · Ctrl+B shows it again')
-    else if (!explorerOpen && !doc) setNotice('↑↓ move · Enter opens · Alt+1 files · Alt+2 editor · Alt+3 command line')
+    else if (!explorerOpen) setNotice(`Alt+1 files · ${doc ? 'Alt+2 editor · ' : ''}Alt+3 command line · Ctrl+B back to ${mascot().name}`)
   }
   // Filtering looks further back than the list usually shows.
   const loadSaved = (limit = sessionFilter ? 200 : 30) =>
