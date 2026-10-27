@@ -264,10 +264,35 @@ const useMouse = (onMouse: (event: Mouse) => void) => {
   }, [stdin, stdout])
 }
 
+// The number pad's keys under the kitty keyboard protocol (CSI code u), which
+// Ink drops as keys that type nothing: 0 to 9, then . / * - + and, past
+// keypad Enter, = and the separator.
+const KEYPAD_CODES: Record<number, string> = {
+  ...Object.fromEntries(Array.from({ length: 10 }, (_, n) => [57399 + n, String(n)])),
+  57409: '.', 57410: '/', 57411: '*', 57412: '-', 57413: '+', 57415: '=', 57416: ',',
+}
+// The same keys in application keypad mode (ESC O letter), which Ink doesn't know either.
+const KEYPAD_LETTERS: Record<string, string> = {
+  ...Object.fromEntries([...'pqrstuvwxy'].map((letter, n) => [letter, String(n)])),
+  n: '.', o: '/', j: '*', m: '-', k: '+', X: '=', l: ',',
+}
+// Shift, Alt, Ctrl and the rest: with these held, a keypad key isn't just typing.
+const HELD_MODIFIERS = 1 | 2 | 4 | 8 | 16 | 32
+
+/** The terminal's input with number pad keys turned back into the characters on them. */
+const keypadAsText = (text: string) =>
+  text
+    .replace(/\x1b\[(\d+)(?:;(\d+)(?::1)?)?u/g, (seq, code: string, mods?: string) => {
+      const char = KEYPAD_CODES[Number(code)]
+      return char && !((Number(mods ?? 1) - 1) & HELD_MODIFIERS) ? char : seq
+    })
+    .replace(/\x1bO([pqrstuvwxynojmkXl])/g, (_, letter: string) => KEYPAD_LETTERS[letter]!)
+
 /**
  * The last chunk read from the terminal, as it came. Ink reports Backspace
  * (sent as DEL) and Ctrl+Backspace (sent as ^H by most terminals) alike, so
- * only the raw key tells them apart.
+ * only the raw key tells them apart. Number pad keys are made plain text here,
+ * before Ink sees them.
  */
 const useLastChunk = () => {
   const { stdin } = useStdin()
@@ -276,8 +301,12 @@ const useLastChunk = () => {
     const stream = stdin as NodeJS.ReadStream
     const read = stream.read
     stream.read = ((size?: number) => {
-      const chunk = read.call(stream, size)
-      if (chunk !== null) last.current = String(chunk)
+      let chunk = read.call(stream, size)
+      if (chunk === null) return chunk
+      const text = String(chunk)
+      const typed = keypadAsText(text)
+      if (typed !== text) chunk = typeof chunk === 'string' ? typed : Buffer.from(typed)
+      last.current = typed
       return chunk
     }) as typeof read
     return () => {
