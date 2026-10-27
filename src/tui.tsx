@@ -17,7 +17,7 @@ import { forget, isPinned, pinnedIds, setTitle, titleOf, togglePin } from './mar
 import { treeRows, type Row } from './explorer.js'
 import { appendOutput, changeDir, completeCommand, completeMention, loadCommands, poshPrompt, runCommand, stopCommand, type LastRun } from './terminal.js'
 import { clickAt, column, editorKey, follow, insertText, isDirty, openDoc, reload, renderLine, save, type Doc } from './editor.js'
-import { activeKey, getSlots, getState, push, setState, useSlots, useStore, type Diff, type Slot, type State } from './store.js'
+import { activeKey, getState, push, setState, useSlots, useStore, type Diff, type Slot, type State } from './store.js'
 import * as session from './session.js'
 import { codexModels } from './codex.js'
 import { settings, settingsProblems, SETTING_NAMES, SETTINGS_FILE } from './settings.js'
@@ -1884,12 +1884,5 @@ export const main = async () => {
   const app = render(<Root />, { alternateScreen: true, exitOnCtrlC: false, maxFps: 30, kittyKeyboard: { mode: 'auto' } })
   await app.waitUntilExit()
   session.closeAll()
-  for (const { state } of getSlots()) {
-    const { sessionId: id, provider, cwd } = state
-    const where = getSlots().length > 1 ? c.dim(` (${basename(cwd) || cwd})`) : ''
-    if (id && provider === 'codex') console.log(c.dim(`Resume this conversation in Codex: codex resume ${id}`) + where)
-    else if (id) console.log(c.dim(`Resume this conversation in Claude Code: claude --resume ${id}`) + where)
-  }
-  console.log(c.dim('=^oo^= Bye!'))
   process.exit(0)
 }

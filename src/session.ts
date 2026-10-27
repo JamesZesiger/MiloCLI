@@ -10,7 +10,9 @@ import {
   type PermissionMode,
   type SDKMessage,
   type SDKUserMessage,
+  type SpawnOptions,
 } from '@anthropic-ai/claude-agent-sdk'
+import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { settings } from './settings.js'
 import * as codex from './codex.js'
@@ -74,6 +76,15 @@ const readIfSmall = (file: string) => {
     return ''
   }
 }
+
+/**
+ * Starts Claude Code in a session of its own, away from Milo's terminal.
+ * Otherwise it can write to the terminal directly, as "[Request interrupted by
+ * user]" when Milo closes it mid-reply, and that shows after Milo has left the
+ * screen. Its stderr goes unread, so it's dropped rather than left to fill up.
+ */
+const spawnClaudeCode = ({ command, args, cwd, env, signal }: SpawnOptions) =>
+  spawn(command, args, { cwd, env, signal, stdio: ['pipe', 'pipe', 'ignore'], detached: process.platform !== 'win32', windowsHide: true })
 
 const CONTEXT_LINES = 3
 
@@ -412,6 +423,7 @@ const createSession = (key: string) => {
         settingSources: ['user', 'project', 'local'],
         mcpServers: { codex: tools.config },
         canUseTool,
+        spawnClaudeCodeProcess: spawnClaudeCode,
       },
     })
     session = current
