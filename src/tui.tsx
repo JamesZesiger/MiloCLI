@@ -12,7 +12,7 @@ import { align } from './diff.js'
 import { folds, logLines } from './render.js'
 import { highlight, isEmpty, selectedText, type Selection } from './select.js'
 import { ago, allSessions, nameSession, characterCommand, completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
-import { imageFile, pasteImage } from './images.js'
+import { imageFile, isVideo, pasteMedia } from './images.js'
 import { forget, isPinned, pinnedIds, setTitle, titleOf, togglePin } from './marks.js'
 import { treeRows, type Row } from './explorer.js'
 import { appendOutput, changeDir, completeCommand, completeMention, loadCommands, poshPrompt, runCommand, stopCommand, type LastRun } from './terminal.js'
@@ -65,7 +65,7 @@ const HELP = [
   '  Ctrl+O         show or hide the last file change',
   '  Ctrl+B         show or hide the file explorer',
   '  Ctrl+T         show or hide the sessions list',
-  '  Ctrl+V / Alt+V paste an image from the clipboard',
+  '  Ctrl+V / Alt+V paste an image or video from the clipboard, or a copied image or video file',
   '  Drag           select text in the workspace; letting go copies it',
   '  Click          show a long prompt of yours in full, or fold it again; on a tool, show its change or open its file',
   '  ↑ ↓            move between the input\'s lines, then through earlier prompts',
@@ -100,8 +100,8 @@ const HELP = [
   '  Ctrl+← / →     move by word; Ctrl+Home / End go to the start or end',
   '  Ctrl+Backspace delete the word before the cursor',
   '  Esc            back to the explorer; Ctrl+B closes both and goes back to talking to Milo',
-  'Image files named in a prompt (typed or dragged in) are sent as pictures, and @path sends a file\'s contents.',
-  'Pastes over 100 characters, images and links show as [Pasted text #1], [Image #2] or [Link #3]; they go in full.',
+  'Image files named in a prompt (typed or dragged in) are sent as pictures, videos as frames (needs ffmpeg), and @path sends a file\'s contents.',
+  'Pastes over 100 characters, images, videos and links show as [Pasted text #1], [Image #2], [Video #3] or [Link #4]; they go in full.',
   'Anything else, including Claude Code commands like /context, /compact and /usage, goes to Claude.',
   `Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`,
 ].join('\n')
@@ -1009,14 +1009,14 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   }
 
   /** A short label for pasted content, which the input shows in its place until it's sent, as Claude Code does. */
-  const label = (kind: 'Pasted text' | 'Image' | 'Link', content: string) => {
+  const label = (kind: 'Pasted text' | 'Image' | 'Video' | 'Link', content: string) => {
     const breaks = content.split('\n').length - 1
     const name = `[${kind} #${pastes.current.size + 1}${breaks ? ` +${breaks} line${breaks === 1 ? '' : 's'}` : ''}]`
     pastes.current.set(name, content)
     return name
   }
-  /** An image file's label; a path with spaces goes quoted so it's still found as one. */
-  const imageLabel = (path: string) => label('Image', /\s/.test(path) ? `"${path}"` : path)
+  /** An image or video file's label; a path with spaces goes quoted so it's still found as one. */
+  const imageLabel = (path: string) => label(isVideo(path) ? 'Video' : 'Image', /\s/.test(path) ? `"${path}"` : path)
   /** The text with each paste label back to what it stands for. */
   const expand = (text: string) => {
     for (const [name, content] of pastes.current) text = text.replaceAll(name, () => content)
@@ -1024,7 +1024,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   }
   /** The paste label that ends just before `at`, if one does. */
   const labelBefore = (text: string, at: number) => {
-    const name = /\[(?:Pasted text|Image|Link) #\d+(?: \+\d+ lines?)?\]$/.exec(text.slice(0, at))?.[0]
+    const name = /\[(?:Pasted text|Image|Video|Link) #\d+(?: \+\d+ lines?)?\]$/.exec(text.slice(0, at))?.[0]
     return name && pastes.current.has(name) ? name : undefined
   }
   /** Where Ctrl+Backspace deletes back to: past a paste label, a word or run of symbols and the spaces after it, or a line break. */
@@ -1035,7 +1035,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     const gone = /(\w+|[^\w\s]+)?[^\S\n]*$/.exec(text.slice(0, at))![0].length
     return Math.max(0, at - (gone || 1))
   }
-  /** Puts pasted text at the cursor; long text, links and image files go in as labels, except on the command line. */
+  /** Puts pasted text at the cursor; long text, links and image and video files go in as labels, except on the command line. */
   const pasteText = (text: string) => {
     const clean = text.replace(/\r\n?/g, '\n')
     const image = shellMode ? undefined : imageFile(clean)
@@ -1053,16 +1053,17 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     edit(now.slice(0, at) + shown + now.slice(at), at + shown.length)
   }
 
-  /** Adds the clipboard's image at the cursor, or `fallback` (the pasted text) when there is none. */
+  /** Adds the clipboard's image or copied files at the cursor, or `fallback` (the pasted text) when there are none. */
   const pasteClipboardImage = (fallback = '') => {
     setNotice('Checking the clipboard…')
-    void pasteImage().then(file => {
+    void pasteMedia().then(files => {
       // The clipboard takes a moment; insert uses where the cursor is now.
-      if (file) {
-        insert(imageLabel(file))
-        return setNotice('Image pasted')
+      if (files.length) {
+        for (const file of files) insert(imageLabel(file))
+        const kind = files.every(isVideo) ? 'Video' : files.some(isVideo) ? 'File' : 'Image'
+        return setNotice(files.length === 1 ? `${kind} pasted` : `${files.length} ${kind.toLowerCase()}s pasted`)
       }
-      if (!fallback) return setNotice('No image on the clipboard')
+      if (!fallback) return setNotice('No image or video on the clipboard')
       pasteText(fallback)
       setNotice('')
     })

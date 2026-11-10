@@ -121,7 +121,7 @@ const HELP = `${c.bold('Commands')}
   /new          start a fresh conversation
   /exit         leave (Ctrl+D works too)
   Tab finishes the command you are typing.
-  Image files named in a prompt (typed or dragged in) are sent as pictures.
+  Image files named in a prompt (typed or dragged in) are sent as pictures, and videos as frames (needs ffmpeg).
   Anything else, including Claude Code commands like /model, /context, /compact and /usage, goes to Claude.
   Milo's own settings, like default_mode = "Auto", live in ${SETTINGS_FILE}.`
 
@@ -463,6 +463,7 @@ const main = async () => {
 
     const prompt = withAttachments(text)
     for (const image of prompt.images) line(c.dim(`  🖼  ${image}`))
+    for (const video of prompt.videos) line(c.dim(`  🎞  ${video}`))
     for (const file of prompt.files) line(c.dim(`  📄 ${file}`))
     for (const problem of prompt.problems) line(c.error(`  ${problem}`))
     replyStarted = false

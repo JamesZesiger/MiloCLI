@@ -5,7 +5,7 @@ import { useSyncExternalStore } from 'react'
 import type { Mood } from './milo.js'
 
 export type Entry =
-  | { kind: 'user'; text: string; images?: string[]; files?: string[] }
+  | { kind: 'user'; text: string; images?: string[]; videos?: string[]; files?: string[] }
   | { kind: 'assistant'; text: string }
   | {
       kind: 'tool'

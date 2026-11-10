@@ -72,15 +72,17 @@ when piped, or with `--plain`, it runs line by line.
 
 Type a prompt and press Enter. Messages sent while Claude is busy wait their
 turn. Image files named in a prompt, typed or dragged in, are sent as pictures,
-and Ctrl+V or Alt+V pastes an image from the clipboard. Type `@` and a path to
+and video files (`.mp4`, `.mov`, `.webm`, `.mkv`, `.avi`) as up to eight frames
+spread over the clip, which needs `ffmpeg` on your PATH. Ctrl+V or Alt+V pastes an image from the clipboard, or image and video files
+copied in a file manager. Type `@` and a path to
 send a file's contents with the prompt: Tab finishes the path from the
 session's folder, and Tab again lists the choices. Files over 256 KB go by name
 only, for Claude to read as it needs. (Codex gets the path and reads the file
 itself.)
 
-As in Claude Code, a paste over 100 characters, an image or a link shows in the
-input as a short label, like `[Pasted text #1 +12 lines]`, `[Image #2]` or
-`[Link #3]`, and goes to Claude in full. Backspace removes a label all at once.
+As in Claude Code, a paste over 100 characters, an image, a video or a link shows
+in the input as a short label, like `[Pasted text #1 +12 lines]`, `[Image #2]`,
+`[Video #3]` or `[Link #4]`, and goes to Claude in full. Backspace removes a label all at once.
 Your prompts stand out in the workspace on their own background; a long one
 folds to two lines, and a click shows it in full or folds it again.
 

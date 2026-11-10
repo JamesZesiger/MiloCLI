@@ -466,13 +466,13 @@ const createSession = (key: string) => {
       return
     }
     const prompt = withAttachments(text)
-    push({ kind: 'user', text, images: prompt.images, files: prompt.files })
+    push({ kind: 'user', text, images: prompt.images, videos: prompt.videos, files: prompt.files })
     for (const problem of prompt.problems) push({ kind: 'note', text: problem, tone: 'error' })
     setState({ busy: true, mood: 'thinking', status: pick(mascot().verbs), turnStarted: Date.now(), turnTools: 0 })
     // The first prompt after a switch carries the conversation so far.
     const before = handoff
     handoff = undefined
-    if (getState().provider === 'codex') sendCodex(before ? before + text : text, prompt.images)
+    if (getState().provider === 'codex') sendCodex(before ? before + text : text, [...prompt.images, ...prompt.frames])
     else if (!before) inbox?.send(prompt.content)
     else
       inbox?.send(
