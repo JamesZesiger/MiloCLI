@@ -900,6 +900,12 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   const innerWidth = mainWidth - 4
   const innerHeight = Math.max(1, workspaceHeight - 2)
   const { lines: log, owners } = useMemo(() => logLines(s.entries, innerWidth, opened), [s.entries, innerWidth, opened])
+  // Scrolled up, the view stays on the same lines as more arrive below; at the
+  // very bottom it follows them. Set during render so no frame shows it jump.
+  const logLength = useRef(log.length)
+  const grown = log.length - logLength.current
+  logLength.current = log.length
+  if (grown && scroll > 0) setScroll(v => Math.max(0, v + grown))
   const offset = Math.min(scroll, Math.max(0, log.length - innerHeight))
   const first = Math.max(0, log.length - offset - innerHeight)
   const showEditor = shellMode && !diff && !!doc
