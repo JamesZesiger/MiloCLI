@@ -31,6 +31,9 @@ const promptLines = (text: string, width: number, open: boolean) => {
   return lines.map(line => c.lift(c.bold(line) + ' '.repeat(Math.max(0, width - stringWidth(line)))))
 }
 
+/** A prompt as it shows pinned to the top of the workspace: folded, like a long one in the log. */
+export const pinnedLines = (text: string, width: number) => promptLines(text, width, false)
+
 /** Whether a prompt has more lines than show while it's folded. */
 export const folds = (entry: Entry, width: number) => entry.kind === 'user' && wrap(`❯ ${entry.text}`, width).length > FOLDED_LINES
 

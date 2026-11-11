@@ -9,7 +9,7 @@ import { CHARACTER_NAMES, mascot } from './characters.js'
 import { c, type Mood } from './milo.js'
 import { portrait, type Size } from './portrait.js'
 import { align } from './diff.js'
-import { folds, logLines } from './render.js'
+import { folds, logLines, pinnedLines } from './render.js'
 import { highlight, isEmpty, selectedText, type Selection } from './select.js'
 import { ago, allSessions, nameSession, characterCommand, completion, settingsCommand, themeCommand, formatAgents, formatCommands, formatSessions, formatStatus, pickSession, recentSessions } from './commands.js'
 import { imageFile, isVideo, pasteMedia } from './images.js'
@@ -397,6 +397,7 @@ const Workspace = ({
   lines,
   first,
   offset,
+  pinned,
   selection,
   glow,
 }: {
@@ -405,6 +406,7 @@ const Workspace = ({
   lines: string[]
   first: number
   offset: number
+  pinned: string[]
   selection: Selection | undefined
   glow: Glow
 }) => {
@@ -418,6 +420,7 @@ const Workspace = ({
   } else {
     view = lines.slice(first, first + innerHeight).map((line, i) => highlight(line, first + i, selection))
     if (offset > 0) view[view.length - 1] = c.dim(`── ${offset} more line${offset === 1 ? '' : 's'} below · PgDn ──`)
+    pinned.forEach((line, i) => (view[i] = line))
   }
   return (
     <Panel label="Workspace" width={width} height={height} glow={glow}>
@@ -908,6 +911,21 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
   if (grown && scroll > 0) setScroll(v => Math.max(0, v + grown))
   const offset = Math.min(scroll, Math.max(0, log.length - innerHeight))
   const first = Math.max(0, log.length - offset - innerHeight)
+  // Where each prompt starts in the log (the blank line above it).
+  const promptStarts = useMemo(
+    () => owners.flatMap((entry, i) => (entry.kind === 'user' && owners[i - 1] !== entry ? [i] : [])),
+    [owners],
+  )
+  // The prompt above the top of the view stays pinned there, and the next one
+  // pushes it out a line at a time as it comes up, as sticky headers do.
+  const section = promptStarts.findLast(start => start + 1 < first)
+  const pinnedEntry = section === undefined || innerHeight < 5 ? undefined : owners[section]
+  const header = useMemo(
+    () => (pinnedEntry?.kind === 'user' ? pinnedLines(pinnedEntry.text, innerWidth) : []),
+    [pinnedEntry, innerWidth],
+  )
+  const nextPrompt = promptStarts.find(start => start > (section ?? -1)) ?? Infinity
+  const pinned = header.slice(Math.max(0, first + header.length - nextPrompt))
   const showEditor = shellMode && !diff && !!doc
   // The terminal pane sits under the open file once there's output, or fills the space without one.
   const showTerminal = shellMode && !diff && (!doc || termLines.length > 0 || !!job)
@@ -1560,6 +1578,11 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
     if (event.kind === 'press') setFocus('input')
     if (diff || shellMode || !log.length) return
     if (event.kind === 'press') {
+      // A click on the pinned prompt goes to it in the log.
+      if (inWorkspace(event.x, event.y) && event.y - WORKSPACE_TOP < pinned.length && section !== undefined) {
+        setScroll(Math.max(0, log.length - innerHeight - (section + 1)))
+        return setSelection(undefined)
+      }
       dragging.current = inWorkspace(event.x, event.y)
       const at = pointAt(event.x, event.y)
       setSelection(dragging.current ? { anchor: at, head: at } : undefined)
@@ -1861,6 +1884,7 @@ export const App = ({ columns, rows }: { columns: number; rows: number }) => {
             lines={log}
             first={first}
             offset={offset}
+            pinned={pinned}
             selection={selection}
             glow={glow}
           />
