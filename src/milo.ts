@@ -28,6 +28,8 @@ export const c = {
   error: role('error'),
   dim: style('2'),
   bold: style('1'),
+  italic: style('3'),
+  strike: style('9'),
   inverse: style('7'),
   lift,
 }

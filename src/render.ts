@@ -4,21 +4,11 @@ import wrapAnsi from 'wrap-ansi'
 import stringWidth from 'string-width'
 import { basename } from 'node:path'
 import { mascot } from './characters.js'
+import { markdown } from './markdown.js'
 import { c } from './milo.js'
 import type { Entry } from './store.js'
 
 const wrap = (text: string, width: number) => wrapAnsi(text, Math.max(10, width), { hard: true, trim: false }).split('\n')
-
-/** Light Markdown: headings, **bold** and `code`. */
-const markdown = (text: string) =>
-  text
-    .split('\n')
-    .map(line =>
-      /^#{1,6} /.test(line)
-        ? c.bold(c.accent(line.replace(/^#+ /, '')))
-        : line.replace(/\*\*([^*\n]+)\*\*/g, (_, s: string) => c.bold(s)).replace(/`([^`\n]+)`/g, (_, s: string) => c.focus(s)),
-    )
-    .join('\n')
 
 /** Lines past which a prompt folds until clicked. */
 const FOLDED_LINES = 2
@@ -57,7 +47,7 @@ const linesFor = (entry: Entry, width: number, labelled: boolean, open: boolean)
         ...(entry.files ?? []).flatMap(file => wrap(c.dim(`  📄 ${basename(file)}`), width)),
       ]
     case 'assistant':
-      return [...(labelled ? ['', c.bold(c.accent(mascot().name))] : []), ...wrap(markdown(entry.text.trim()), width)]
+      return [...(labelled ? ['', c.bold(c.accent(mascot().name))] : []), ...markdown(entry.text.trim(), width)]
     case 'tool': {
       const head = wrap(`  ${ICONS[entry.status]} ${c.bold(entry.name)}  ${c.dim(entry.detail)}`, width)
       if (!entry.error) return head
